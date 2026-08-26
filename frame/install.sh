@@ -113,7 +113,7 @@ if [ -f "$CONFIG" ]; then
   fi
   echo "     $CONFIG already exists, leaving it untouched."
 elif [ "$MODE" = local ]; then
-  cat > "$CONFIG" <<'CFG'
+  cat > "$CONFIG.new" <<'CFG'
 # birdframe-mode: local
 # AvianVisitors frame, local mode: mirrors the BirdNET-Pi on your network.
 # This Pi screenshots birdnet.local itself, so there is nothing else to set up.
@@ -124,15 +124,16 @@ shoot_subtitle = "Heard Today"
 # Names written along each bird. `birdframe-names off` drops them.
 bird_names = true
 fresh_minutes = 30   # outline a bird heard this recently; 0 turns the mark off
-hours = 48           # 24h at full strength, then a fade out to the window edge
-fade_hours = 24      # silence before a bird starts losing colour; 0 = no fading
-# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?
-# Uncomment all five:
-# opening = 0.7071
-# opening_aspect = 0.7071
-# title_frac = 0.065
-# collage_frac = 0.66
-# gap_frac = 0.1
+fade_hours = 24      # silence before a bird fades; inert until hours is widened
+# Taken the matboard out? These seven give the bare panel a full-size collage,
+# and a second day of birds fading out behind the first:
+# opening = 0.97
+# opening_aspect = 0.75
+# title_frac = 0.10
+# collage_frac = 0.98
+# gap_frac = 0.05
+# shoot_collage_vh = 74
+# hours = 48
 rotate = 90          # flip to 270 if the frame hangs the other way up
 saturation = 0.6
 timeout = 180        # a Zero 2 W needs ~70-120s to shoot the collage
@@ -140,6 +141,7 @@ timeout = 180        # a Zero 2 W needs ~70-120s to shoot the collage
 # basic_user = "..."
 # basic_pass = "..."
 CFG
+mv "$CONFIG.new" "$CONFIG"
 elif [ "$MODE" = image ]; then
   BASE="$(printf '%s' "$IMAGE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')"
   # printf, not a heredoc: the URL is written literally, never shell-expanded.
@@ -151,14 +153,17 @@ elif [ "$MODE" = image ]; then
     printf '%s\n' 'shoot = false'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?"
-    printf '%s\n' "# Uncomment all five:"
-    printf '%s\n' "# opening = 0.7071"
-    printf '%s\n' "# opening_aspect = 0.7071"
-    printf '%s\n' "# title_frac = 0.065"
-    printf '%s\n' "# collage_frac = 0.66"
-    printf '%s\n' "# gap_frac = 0.1"
-  } > "$CONFIG"
+    printf '%s\n' "# Taken the matboard out? These seven give the bare panel a full-size collage,"
+    printf '%s\n' "# and a second day of birds fading out behind the first:"
+    printf '%s\n' "# opening = 0.97"
+    printf '%s\n' "# opening_aspect = 0.75"
+    printf '%s\n' "# title_frac = 0.10"
+    printf '%s\n' "# collage_frac = 0.98"
+    printf '%s\n' "# gap_frac = 0.05"
+    printf '%s\n' "# shoot_collage_vh = 74"
+    printf '%s\n' "# hours = 48"
+  } > "$CONFIG.new"
+  mv "$CONFIG.new" "$CONFIG"
 else
   # birdweather: this Pi renders from BirdWeather near $ZIP, gated on the same
   # signature as the other modes - it only redraws when the local top birds change.
@@ -176,14 +181,17 @@ else
     printf '%s\n' 'bird_names = true'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?"
-    printf '%s\n' "# Uncomment all five:"
-    printf '%s\n' "# opening = 0.7071"
-    printf '%s\n' "# opening_aspect = 0.7071"
-    printf '%s\n' "# title_frac = 0.065"
-    printf '%s\n' "# collage_frac = 0.66"
-    printf '%s\n' "# gap_frac = 0.1"
-  } > "$CONFIG"
+    printf '%s\n' "# Taken the matboard out? These seven give the bare panel a full-size collage,"
+    printf '%s\n' "# and a second day of birds fading out behind the first:"
+    printf '%s\n' "# opening = 0.97"
+    printf '%s\n' "# opening_aspect = 0.75"
+    printf '%s\n' "# title_frac = 0.10"
+    printf '%s\n' "# collage_frac = 0.98"
+    printf '%s\n' "# gap_frac = 0.05"
+    printf '%s\n' "# shoot_collage_vh = 74"
+    printf '%s\n' "# hours = 48"
+  } > "$CONFIG.new"
+  mv "$CONFIG.new" "$CONFIG"
 fi
 
 sudo ln -sfn "$FRAME/birdframe-names" /usr/local/bin/birdframe-names
@@ -200,7 +208,12 @@ if [ "$MODE" = birdweather ] && [ -n "$EBIRD_KEY" ]; then
 fi
 sudo cp systemd/birdframe.timer /etc/systemd/system/birdframe.timer
 sudo systemctl daemon-reload
-sudo systemctl enable --now birdframe.timer  # --now starts it immediately, not only on the next boot
+sudo systemctl enable birdframe.timer
+# restart, not `enable --now`: on a re-run the timer is already active and
+# --now leaves a running unit alone, so a changed unit file would not take
+# effect until the next boot. Restarting also resets OnActiveSec, so the first
+# scheduled render is 2 min from now rather than whenever the old timer was due.
+sudo systemctl restart birdframe.timer
 
 case "$MODE" in
   local)
@@ -252,6 +265,16 @@ esac
 # already up (e.g. a re-run) so we don't bounce a working frame.
 if [ -e /dev/spidev0.0 ]; then
   echo "SPI already active, no reboot needed."
+  # Draw the panel now. An upgrade changes how the frame renders but not what
+  # the birds are doing, so the change signature is identical and the timer
+  # would decide there is nothing to do - leaving the previous picture up until
+  # a new species turns up or the daily heal fires, which looks exactly like the
+  # install having failed. --force is the only thing that shows this build's work.
+  echo "Drawing the panel now (a Zero 2 W takes 1-2 min)..."
+  if ! "$FRAME/.venv/bin/python" "$FRAME/display.py" --config "$CONFIG" --force; then
+    echo "     That render did not finish. The timer retries within 15 min;" >&2
+    echo "     'journalctl -u birdframe -n 50' has the reason." >&2
+  fi
 else
   echo "Rebooting to bring SPI up (back on its own in ~1 min)..."
   sleep 4

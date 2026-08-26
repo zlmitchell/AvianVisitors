@@ -139,9 +139,9 @@ Every bird carries its common name, written along a run of its own outline rathe
 
 ## Wall frame
 
-An optional e-ink frame mirrors the collage onto a panel by your window: a day's birds at full strength with yesterday's fading out behind them. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
+An optional e-ink frame mirrors the collage onto a panel by your window. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
 
-The frame draws to the bare 13.3" panel by default rather than the A5 mat opening it used to. If you have an existing frame with the matboard still in, [`frame/README.md`](frame/README.md#layout-the-panel-or-a-mat-cut-for-it) has the five config lines that put it back.
+It draws into the A4 frame's A5 mat opening, as the kit ships. Take the matboard out and seven config lines let the collage run to the glass instead — 47% of the panel to 94%, and a second day of birds fading out behind the first. [`frame/README.md`](frame/README.md#layout-the-mat-or-the-bare-panel) has them.
 
 ---
 

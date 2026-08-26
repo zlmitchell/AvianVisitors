@@ -57,10 +57,12 @@ def _frame_css(headline_px, eyebrow_px, lowercase, pad_top, pad_side, pad_bottom
         f".view#v0 {{ height: 100% !important; flex: 1 1 100% !important; padding: 6px 0 !important; }}"
         f".gcollage {{ max-width: none !important; }}"
         # 40px, not the site's own 14. display.py splits the title off the
-        # collage at the first 60-device-pixel band of clear paper between
-        # them, and at dsf=2 this padding is the only part of that band it can
-        # count on: with the collage now taking three quarters of the viewport,
-        # the packed cluster no longer leaves slack of its own to borrow.
+        # collage at the first 60-device-pixel band of clear paper between them,
+        # and at dsf=2 this padding is the only part of that band it can count
+        # on. At the default collage height the packed cluster usually leaves
+        # slack of its own to borrow; raise shoot_collage_vh for a bare panel
+        # and it stops doing so, and a missed split drops the frame back to
+        # placing the whole crop as one block at the wrong size.
         f".static-head {{ padding: 0 8px 40px !important; }}"
         f".static-head .pre {{ font-size: {eyebrow_px}px !important; }}"
         f".static-head h1 {{ font-size: {headline_px}px !important; }}"
@@ -191,11 +193,11 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, auth, misses):
 
 def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           headline_px=42, eyebrow_px=18, lowercase=False,
-          mat=0.04, collage_vh=74, cluster_xbias=1.0, cluster_ybias=1.2,
+          mat=0.04, collage_vh=52, cluster_xbias=1.0, cluster_ybias=1.2,
           count_exp=0.4, cluster_pad=1, label_min_px=11, small_floor=0.04, window_hours=None,
           timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
           cutout_local=None, empty_text="listening for birds…", bird_names=True,
-          fresh_minutes=30, fade="24-48"):
+          fresh_minutes=30, fade="0"):
     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
 
@@ -346,7 +348,7 @@ def main():
     ap.add_argument("--eyebrow-px", type=int, default=None,
                     help="eyebrow font px; default 18 for the mic, 17 for --bird-weather")
     ap.add_argument("--mat", type=float, default=0.04)
-    ap.add_argument("--collage-vh", type=float, default=74,
+    ap.add_argument("--collage-vh", type=float, default=52,
                     help="share of the viewport height the collage gets; more source "
                          "pixels for a full-panel opening, less for a small mat")
     ap.add_argument("--cluster-xbias", type=float, default=1.0)
@@ -372,7 +374,7 @@ def main():
                     help="draw the collage without names")
     ap.add_argument("--fresh-minutes", type=int, default=30,
                     help="outline birds heard this recently; 0 turns the mark off")
-    ap.add_argument("--fade", default="24-48",
+    ap.add_argument("--fade", default="0",
                     help='drain colour from birds over "<start>-<end>" hours of '
                          'silence; 0 turns fading off')
     ap.add_argument("--timeout", type=int, default=45000)

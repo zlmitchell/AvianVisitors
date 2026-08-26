@@ -1,6 +1,6 @@
 # AvianVisitors e-ink frame
 
-*A day's birds at full strength, yesterday's fading out behind them, framed on the wall by your window.*
+*A day's birds, framed on the wall by your window.*
 
 A [Pimoroni Inky Impression 13.3"](https://amzn.to/4xlAWr3) (Spectra 6) mirroring the live collage. A Pi screenshots the site, mats it onto the panel, and pushes it, refreshing only when the birds change. Every bird carries its name written along its own outline; whichever birds are singing right now wear a stroke round their silhouette; and the ones that have gone quiet fade out over their second day. Build one of your own at [theodore.net/projects/AvianVisitors#frame-ous](https://theodore.net/projects/AvianVisitors/#frame-ous).
 
@@ -65,40 +65,39 @@ Pick how the frame gets its birds:
 ./install.sh --image-url https://bird.onethreenine.net/frame.png?k=YOUR_FRAME_KEY
 ```
 
-Each one enables SPI + I2C, installs the deps and a systemd timer, writes `~/.birdframe/config.toml`, and reboots once to bring SPI up. Full options live in [`config.example.toml`](config.example.toml).
+Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml`. Full options live in [`config.example.toml`](config.example.toml).
 
-### Layout: the panel, or a mat cut for it
+On a **first** install SPI is not up yet, so it reboots and the timer draws the first frame about two minutes later. On a **re-run or upgrade** SPI is already up, so it restarts the units and forces one render immediately — without that the panel would sit on the old picture, because an upgrade changes how the frame renders but not what the birds are doing, and the change-gate would correctly decide there was nothing to redraw.
 
-The frame draws to the **bare panel** by default: pull the matboard out of the A4 frame and the collage runs to the glass. The A5 window used 47% of the panel; the bare panel uses 94%, and the collage inside it goes from 528px wide to 1141px — **2.16x linear** on the title, the names and the birds.
+### Layout: the mat, or the bare panel
 
-That is the opening's contribution on its own. What actually reaches the wall also depends on how many birds are on the plate, and the default 48h window puts roughly twice as many there as 24h did — see [the note under Birds going quiet](#birds-going-quiet), which is where the rest of that 2.16x goes.
+A default install draws into the **A5 window of the A4 frame from the BOM** — what an unmodified kit has in front of the panel. That window covers 47% of the glass, and it is the default because anything larger prints under the matboard.
 
-Two numbers describe the opening, and three more divide it up:
+**Take the matboard out** and the collage can run to the glass: 94% of the panel, the collage going from 528px to 1141px wide, **2.16x linear** on the title, the names and the birds. Seven keys go together, and they are already in `~/.birdframe/config.toml` commented out:
 
-| Key | Bare panel (default) | A5 mat |
-|-----|---------------------|--------|
-| `opening` | `0.97` | `0.7071` |
-| `opening_aspect` | `0.75` (the panel's own 1200x1600) | `0.7071` |
-| `title_frac` | `0.10` | `0.065` |
-| `collage_frac` | `0.98` | `0.66` |
-| `gap_frac` | `0.05` | `0.1` |
+| Key | A5 mat (default) | Bare panel |
+|-----|------------------|------------|
+| `opening` | `0.7071` | `0.97` |
+| `opening_aspect` | `0.7071` | `0.75` (the panel's own 1200x1600) |
+| `title_frac` | `0.065` | `0.10` |
+| `collage_frac` | `0.66` | `0.98` |
+| `gap_frac` | `0.1` | `0.05` |
+| `shoot_collage_vh` | `52` | `74` |
+| `hours` | `24` | `48` |
 
-`opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes a bare panel and any mat you cut for one. `title_frac` and `gap_frac` are fractions of the opening's height, `collage_frac` of its width.
+`opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes the bare panel and any mat you cut for one. `title_frac` and `gap_frac` are fractions of the opening's height, `collage_frac` of its width. `shoot_collage_vh` decides how many source pixels the birds are drawn with before being resampled onto the panel — 52 suits the small opening, 74 the large one, and much past 76 the title runs out of viewport.
 
-**Keeping your mat?** Set all five to the right-hand column. Setting `opening` alone leaves the content the size it always was, just further apart — that is what these five are for.
+**Move all seven or none.** Raising `opening` on its own leaves the content the size it always was, just further apart — that is what the four fractions are for. And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
 
-Check it before hanging anything: `display.py --preview out.png --mat-box` writes an approximate six-ink dither with the opening outlined in red, on any machine, no panel needed.
+Check it before you cut anything: `display.py --preview out.png --mat-box` writes an approximate six-ink dither with the opening outlined in red, on any machine, no panel needed.
 
-Any config value can be overridden for one run with `-o key=value`, repeatable, without touching `config.toml` — which is how to try a setting on the actual panel before committing to it:
+Any config value can be overridden for one run with `-o key=value`, repeatable, without touching `config.toml` — which is how to try the bare panel on the real thing before committing to it:
 
 ```bash
-# the old A5 mat, just for this render
-display.py --config ~/.birdframe/config.toml --force   -o opening=0.7071 -o opening_aspect=0.7071   -o title_frac=0.065 -o collage_frac=0.66 -o gap_frac=0.1
+display.py --config ~/.birdframe/config.toml --force -o opening=0.97 -o opening_aspect=0.75 -o title_frac=0.10 -o collage_frac=0.98 -o gap_frac=0.05 -o shoot_collage_vh=74 -o hours=48
 ```
 
 An unknown key is an error rather than a silent no-op, so a typo cannot look like "that setting does nothing".
-
-If you enlarge the opening a lot, raise `shoot_collage_vh` with it (74 by default, was 52). The render is a fixed 1200x1600 whatever happens, so that number decides how many source pixels the birds and their names are drawn with before being resampled onto the panel. Much past 76 and the title runs out of viewport.
 
 ### Bird names
 
@@ -127,7 +126,9 @@ An outline changes only when a bird crosses in or out of the window, which is th
 
 ### Birds going quiet
 
-A bird that has not been heard for `fade_hours` (24 by default) starts losing its colour, draining in five steps until the window drops it at `hours` (48). So the plate is a day's listening at full strength with yesterday's birds fading out behind it.
+A bird that has not been heard for `fade_hours` (24) starts losing its colour, draining in five steps until the window drops it at `hours`. So the plate becomes a day's listening at full strength with yesterday's birds fading out behind it.
+
+**This is off on a default install**, because `hours` is also 24 — there is no tail past the fade point, so nothing dims. Widening the window is the single thing that switches it on; `fade_hours` is already sitting there waiting for a tail to run down.
 
 Spectra 6 has six inks and nothing between them, so there is no grey to fade through: the dither renders a faded bird as sparse black stipple on cream. It reads as fading from across a room and as stipple up close. On the website the same ramp is a smooth grey, and hovering a quiet bird brings it back to full strength.
 
@@ -135,16 +136,18 @@ Five steps rather than a gradient, and for the same reason the singing mark is a
 
 `fade_hours = 0` turns fading off. Setting `hours = 24` also turns it off, because there is then no tail to fade over.
 
-**What the second day costs in size.** The plate's tile areas are shares of one budget, so twice the birds means roughly half the area each — and `apt.js`'s own tuning table steps the budget down again past 12 and 24 species. Measured on a plausible day's counts, median tile size on the panel:
+**Why the window is tied to the opening.** Tile areas are shares of one budget, so twice the birds is roughly half the area each — and `apt.js`'s tuning table steps the budget down again past 12 and 24 species. Measured on a plausible day's counts, median tile on the panel:
 
-| | median tile | vs the old frame |
+| | median tile | vs a default install |
 |---|---|---|
-| 10 species / 24h / A5 opening | 96 px | baseline |
-| 10 species / 24h / bare panel | 207 px | 2.16x |
-| 20 species / 48h / bare panel | 127 px | 1.32x |
-| 20 species / 48h / bare panel, bracketed | 115 px | **1.20x** (shipped) |
+| 10 species / 24h / A5 mat | 96 px | **baseline (default)** |
+| 20 species / 48h / A5 mat | 54 px | 0.56x — birds half size, most on the minimum-tile floor |
+| 10 species / 24h / bare panel | 211 px | 2.20x |
+| 20 species / 48h / bare panel | 117 px | 1.22x |
 
-Still bigger than the old frame, but the second day eats most of what the bare panel bought. If you would rather have the size than the fade, the levers are `hours = 24` (no fade, back to ~2.16x), or a smaller `fade_hours` so the tail is shorter, or capping how many birds reach the plate.
+Which is why `hours = 48` sits in the bare-panel block and not on its own: widening the window inside the A5 mat makes every bird smaller than it is today. On the bare panel the second day still costs most of the 2.20x, but it costs it from a much larger starting point.
+
+If you want the fade *and* the size, the remaining lever is fewer birds on the plate — cap the species, or shorten `fade_hours` so the tail is shorter.
 
 ### Why the birds stop jumping
 

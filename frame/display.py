@@ -45,11 +45,16 @@ DEFAULTS = {
     "zip": "",              # BirdWeather ZIP / postal code (with species_source = "birdweather")
     "bw_days": 7,           # BirdWeather lookback window, in days
     "bw_country": "us",     # geocoder country for the ZIP
-    # 48, not 24: the second day is what the fade ramp is drawn over. A bird
-    # heard in the last 24h is shown at full strength; past that it loses colour
-    # in steps until the window drops it. Narrow this to 24 and nothing fades,
-    # because there is no tail left to fade over.
-    "hours": 48,
+    # The window shown on the frame, and the thing the fade below is drawn
+    # over: a bird is at full strength for `fade_hours` and then drains until
+    # this drops it. At 24 there is no tail, so nothing fades - which is the
+    # default, because widening the window is not free. Tile areas are shares of
+    # one budget, so twice the birds is roughly half the area each: measured on
+    # a plausible day's counts, 48h in the A5 opening takes the median bird from
+    # 96px to 54px and pins most of the plate on the minimum-tile floor. Widen
+    # this only together with the opening - see the bare-panel block in
+    # config.example.toml, which moves both.
+    "hours": 24,
     "image": "",            # local PNG written by the shooter
     "image_url": "",        # or a published screenshot URL
     "shoot": False,         # or capture inline (needs a browser; the 3 A+ and Zero 2 W both handle it)
@@ -63,30 +68,33 @@ DEFAULTS = {
     # over half of them away; a full-panel opening wants the collage drawn close
     # to panel size in the first place. The rest of the viewport has to hold the
     # title and the stage padding, so this cannot go much past 76.
-    "shoot_collage_vh": 74,
+    "shoot_collage_vh": 52,
     "bird_names": True,
     "fresh_minutes": 30,    # outline birds heard this recently; 0 turns the mark off
     # Hours of silence before a bird starts losing its colour. It finishes at
     # `hours`, where the window drops it, so the ramp is fade_hours -> hours.
-    # 0 turns fading off and every bird in the window stays at full strength.
+    # 0 turns fading off. This sits at 24 with `hours` also at 24, which means
+    # no ramp and nothing faded: raise `hours` and the fade appears on its own,
+    # with no second setting to remember.
     "fade_hours": 24,
     "mat": 0.0,             # extra global shrink of the content inside the opening
     # The opening is the rectangle the content is fitted into. `opening` is its
     # height as a fraction of the panel and `opening_aspect` is its width over
-    # its height. The defaults are the bare panel's own 1200x1600 at 97%, which
-    # is what a frame with the matboard taken out wants. An A4 frame still
-    # carrying its A5 mat is opening = 0.7071, opening_aspect = 0.7071.
-    "opening": 0.97,
-    "opening_aspect": 0.75,
+    # its height. The defaults are the A5 window in the A4 frame from the BOM,
+    # which is what an unmodified kit has in front of the panel. Taking the
+    # matboard out is opening = 0.97, opening_aspect = 0.75 - the panel's own
+    # 1200x1600 - and wants the four numbers below moved with it.
+    "opening": 0.7071,
+    "opening_aspect": 0.7071,
     # How the title and collage divide the opening. Fractions rather than
     # pixels so one set of numbers covers the bare panel and any mat cut for
     # it: title_frac and gap_frac are of the opening's height, collage_frac of
     # its width. Raising the opening without raising these would only move the
     # same small content further apart, which is why they are config and not
     # constants.
-    "title_frac": 0.10,
-    "collage_frac": 0.98,
-    "gap_frac": 0.05,
+    "title_frac": 0.065,
+    "collage_frac": 0.66,
+    "gap_frac": 0.1,
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
@@ -325,15 +333,15 @@ def _centroid_x(img, paper):
 # opening height. These are the shipped defaults; every one is a config key,
 # because a bare panel and an A5 mat want very different numbers and the whole
 # point of enlarging the opening is that the content grows with it.
-TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.10, 0.98, 0.05
+TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.065, 0.66, 0.1
 
 
 def layout_of(cfg):
     """Everything mat_and_center needs, pulled out of config. Every fraction is
     validated here rather than deep in the resize, so a typo in config.toml
     fails loudly instead of quietly mis-sizing the panel."""
-    opening = _frac(cfg.get("opening", 0.97), "opening")
-    aspect = _frac(cfg.get("opening_aspect", 0.75), "opening_aspect", hi=10.0)
+    opening = _frac(cfg.get("opening", 0.7071), "opening")
+    aspect = _frac(cfg.get("opening_aspect", 0.7071), "opening_aspect", hi=10.0)
     return {
         "mat": cfg.get("mat", 0.0) or 0.0,
         "opening": opening,
@@ -585,11 +593,38 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     print("panel updated")
 
 
+def _toml_error(path, exc):
+    """tomllib names neither the file nor the text that broke it - on a headless
+    frame that means a journal full of parser traceback and a walk over to the
+    Pi to find out which line it meant. Quote the line and point at the column."""
+    out = [f"{path} is not valid TOML: {exc}"]
+    where = re.search(r"at line (\d+), column (\d+)", str(exc))
+    if where:
+        line_no, col = int(where.group(1)), int(where.group(2))
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        if 0 < line_no <= len(lines):
+            prefix = f"  {line_no} | "
+            out.append(prefix + lines[line_no - 1])
+            out.append(" " * (len(prefix) + col - 1) + "^")
+    out.append('  Text needs "double quotes"; true/false and numbers go bare. '
+               "A # starts a comment.")
+    return "\n".join(out)
+
+
 def load_config(path):
     cfg = dict(DEFAULTS)
-    if path:
-        with open(os.path.expanduser(path), "rb") as f:
+    if not path:
+        return cfg
+    path = os.path.expanduser(path)
+    try:
+        with open(path, "rb") as f:
             cfg.update(tomllib.load(f))
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(_toml_error(path, exc)) from exc
     return cfg
 
 
@@ -632,7 +667,11 @@ def main():
                          "-o fresh_minutes=0 -o opening=0.7071. Not written to config.toml.")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
     for key in ("base_url", "image", "image_url"):
         val = getattr(args, key)
         if val:

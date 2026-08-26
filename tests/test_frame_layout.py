@@ -34,21 +34,32 @@ display = load_display()
 
 
 # --- the opening ------------------------------------------------------------
-def test_default_opening_is_the_bare_panel():
-    """The shipped default fills the panel rather than an A5 window in the
-    middle of it. The regression this guards is the whole point of the change:
-    at the old 0.7071/A5 the content used barely half the glass."""
+def test_default_opening_is_the_a5_mat():
+    """An unmodified kit has the A4 frame's matboard in front of the panel, so
+    that is what a default install has to draw into - anything larger prints
+    under the mat. The bare panel is opt-in."""
     w, h = display.opening_size(display.DEFAULTS["opening"], display.DEFAULTS["opening_aspect"])
-    assert w == pytest.approx(display.PANEL_W * 0.97, rel=0.01)
-    assert h == pytest.approx(display.PANEL_H * 0.97, rel=0.01)
-    assert w / h == pytest.approx(display.PANEL_W / display.PANEL_H, rel=0.01)
-
-
-def test_a5_mat_still_reachable():
-    """The A4 frame's A5 mat is two config values, not a code path."""
-    w, h = display.opening_size(0.7071, 0.7071)
     assert h == pytest.approx(display.PANEL_H * 0.7071)
     assert w / h == pytest.approx(1 / 1.41421, rel=1e-4)
+
+
+def test_default_install_never_fades():
+    """`hours` and `fade_hours` both sit at 24, so there is no tail past the
+    fade point and nothing dims. Widening the window is what switches it on -
+    it must not be on by default, because 48h in the A5 opening halves the
+    birds."""
+    assert display.DEFAULTS["hours"] == display.DEFAULTS["fade_hours"]
+    assert display.fade_param(display.DEFAULTS) == "0"
+    assert display.fade_steps(aged(("Melospiza melodia", 40)), ANCHOR_S,
+                              display.DEFAULTS["fade_hours"], display.DEFAULTS["hours"]) == {}
+
+
+def test_bare_panel_is_reachable_and_much_larger():
+    """The opt-in the docs describe has to actually do what they claim."""
+    a5_w, a5_h = display.opening_size(0.7071, 0.7071)
+    bare_w, bare_h = display.opening_size(0.97, 0.75)
+    assert bare_w / a5_w > 1.4 and bare_h / a5_h > 1.3
+    assert (bare_w * bare_h) / (display.PANEL_W * display.PANEL_H) > 0.9
 
 
 def test_opening_never_runs_off_the_glass():
@@ -341,9 +352,12 @@ def test_tile_size_brackets_match_the_signature_brackets():
     assert js == edges, f"apt.js {js} vs display.py {edges}"
 
 
-def test_default_window_leaves_room_for_the_fade():
-    assert display.DEFAULTS["fade_hours"] < display.DEFAULTS["hours"]
-    assert display.fade_param(display.DEFAULTS) == "24-48"
+def test_the_bare_panel_opt_in_switches_the_fade_on():
+    """Widening `hours` is the single thing that turns fading on: fade_hours is
+    already sitting at 24 waiting for a tail to run down."""
+    widened = {**display.DEFAULTS, "hours": 48}
+    assert display.fade_param(widened) == "24-48"
+    assert display.fade_steps(aged(("Melospiza melodia", 40)), ANCHOR_S, 24, 48) != {}
 
 
 def test_the_collage_draws_nothing_from_an_unseeded_clock_or_coin():
