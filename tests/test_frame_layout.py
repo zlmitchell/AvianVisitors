@@ -500,3 +500,24 @@ def test_every_apt_js_rewrite_still_matches():
     assert len(patterns) >= 6, f"only found {len(patterns)} rewrite patterns"
     for pat in patterns:
         assert _re.search(pat, APT_JS), f"apt.js no longer matches {pat!r}"
+
+
+def test_both_render_paths_get_the_same_look_settings():
+    """obtain_image has two branches - the mic screenshots a live site, the
+    BirdWeather path renders one locally - and they call different functions.
+    A look setting threaded into one and not the other renders differently in
+    the two modes, which is exactly how the bare panel shipped names at twice
+    the size in BirdWeather mode. Compare the keyword sets."""
+    import ast
+    src = (FRAME / "display.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "obtain_image")
+    calls = {c.func.id: {k.arg for k in c.keywords}
+             for c in ast.walk(fn)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id in ("shoot", "shoot_birdweather")}
+    assert set(calls) == {"shoot", "shoot_birdweather"}, calls
+    shared = {"title", "subtitle", "bird_names", "collage_vh", "label_scale", "timeout_ms"}
+    for name, kwargs in calls.items():
+        missing = shared - kwargs
+        assert not missing, f"{name}() is missing {sorted(missing)}"

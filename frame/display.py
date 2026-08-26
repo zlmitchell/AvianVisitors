@@ -566,7 +566,7 @@ def obtain_image(cfg, species=None):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         shoot_birdweather(out, species, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
                           timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"],
-                          collage_vh=cfg["shoot_collage_vh"])
+                          collage_vh=cfg["shoot_collage_vh"], label_scale=label_scale(cfg))
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
         from shoot import shoot
