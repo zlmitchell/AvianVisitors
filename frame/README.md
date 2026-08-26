@@ -118,7 +118,7 @@ A default install draws into the **A5 window of the A4 frame from the BOM** — 
 
 **Take the matboard out** and the collage runs to the glass: 94% of the panel instead of 47%. Five keys go together, and they are already in `~/.birdframe/config.toml` commented out:
 
-| Key | A5 mat (default) | Bare panel |
+| Key | `with mat` — A5, the default | `no mat` — the bare panel |
 |-----|------------------|------------|
 | `opening` | `0.7071` | `0.97` |
 | `opening_aspect` | `0.7071` | `0.75` (the panel's own 1200x1600) |
@@ -136,7 +136,7 @@ One trade worth knowing: holding the names still means the browser rasterises th
 
 Check it before you cut anything: `display.py --preview out.png --mat-box` writes an approximate six-ink dither with the opening outlined in red, on any machine, no panel needed.
 
-Any config value can be overridden for one run with `-o key=value`, repeatable, without touching `config.toml` — which is how to try the bare panel on the real thing before committing to it:
+In `birdframe`, flip the `matboard` row and press `p` before `s`: that renders the whole change to a PNG without writing the config or touching the panel. Or override any value for one run with `-o key=value`, repeatable, leaving `config.toml` alone:
 
 ```bash
 display.py --config ~/.birdframe/config.toml --force -o opening=0.97 -o opening_aspect=0.75 -o collage_frac=0.98 -o shoot_collage_vh=74 -o hours=48
