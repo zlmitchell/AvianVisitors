@@ -170,7 +170,7 @@ def _make_cutout_handler(base, local_dir=None):
     return handler
 
 
-def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, auth, misses):
+def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, label_scale, auth, misses):
     """Rewrite the collage tunables inside the page's apt.js at capture time."""
     def handler(route):
         try:
@@ -180,7 +180,8 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, auth, misses):
                               (r"var yBias = narrow \? 1\.7 : 1;", f"var yBias = {ybias};"),
                               (r"countExp:\s*[\d.]+,", f"countExp: {count_exp},"),
                               (r"var pad = narrow \? Math\.max\(1, COLLAGE_PAD - 1\) : COLLAGE_PAD;", f"var pad = {pad};"),
-                              (r"var LABEL_MIN_PX = \d+;", f"var LABEL_MIN_PX = {int(label_min_px)};")):
+                              (r"var LABEL_MIN_PX = \d+;", f"var LABEL_MIN_PX = {int(label_min_px)};"),
+                              (r"var LABEL_SCALE = [\d.]+;", f"var LABEL_SCALE = {label_scale};")):
                 js, n = re.subn(pat, repl, js)
                 if not n:
                     misses.append(pat)
@@ -197,7 +198,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           count_exp=0.4, cluster_pad=1, label_min_px=11, small_floor=0.04, window_hours=None,
           timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
           cutout_local=None, empty_text="listening for birds…", bird_names=True,
-          fresh_minutes=30, fade="0"):
+          fresh_minutes=30, fade="0", label_scale=1.0):
     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
 
@@ -214,9 +215,14 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
             page = browser.new_context(**ctx_kw).new_page()
             misses = []
             page.route("**/birdnet-api.php**", _make_api_handler(small_floor, window_hours, auth, species))
+            # The floor moves with the type: it exists so the handwriting stays
+            # readable, and at a smaller scale the same physical size is fewer
+            # css pixels. 4 is where the browser's own metrics stop being worth
+            # trusting, so it does not go below that however far the scale does.
             page.route("**/apt.js*", _make_js_handler(
                 cluster_xbias, cluster_ybias, count_exp, cluster_pad,
-                label_min_px, auth, misses))
+                max(4, round(label_min_px * label_scale)), round(label_scale, 4),
+                auth, misses))
             if bird_names:
                 hand_font = os.path.realpath(os.path.join(
                     os.path.dirname(__file__), "..", "avian", "frontend", "fonts", "Caveat.ttf"))
@@ -374,6 +380,9 @@ def main():
                     help="draw the collage without names")
     ap.add_argument("--fresh-minutes", type=int, default=30,
                     help="outline birds heard this recently; 0 turns the mark off")
+    ap.add_argument("--label-scale", type=float, default=1.0,
+                    help="multiply the bird-name type size (the frame derives this "
+                         "from its opening so names stay one physical size)")
     ap.add_argument("--fade", default="0",
                     help='drain colour from birds over "<start>-<end>" hours of '
                          'silence; 0 turns fading off')
@@ -417,7 +426,8 @@ def main():
               cluster_ybias=a.cluster_ybias, count_exp=count_exp, cluster_pad=a.cluster_pad,
               small_floor=a.small_floor,
               window_hours=a.window_hours, timeout_ms=a.timeout, user=a.user, password=a.password,
-              bird_names=a.bird_names, fresh_minutes=a.fresh_minutes, fade=a.fade)
+              bird_names=a.bird_names, fresh_minutes=a.fresh_minutes, fade=a.fade,
+              label_scale=a.label_scale)
     except Exception as e:
         print(f"shoot failed: {e}", file=sys.stderr)
         sys.exit(1)

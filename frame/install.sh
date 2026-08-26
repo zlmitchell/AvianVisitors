@@ -81,24 +81,67 @@ if [ "$MODE" = image ]; then NEEDS_BROWSER=0; fi
 CONFIG_TXT=/boot/firmware/config.txt
 [ -f "$CONFIG_TXT" ] || CONFIG_TXT=/boot/config.txt
 
+# Every step below is a no-op on a re-run if what it installs is already there.
+# A fresh install is unchanged; a re-run (or an upgrade) skips straight to the
+# config and the render instead of spending minutes re-checking apt and pip.
+
 echo "1/5  Enabling SPI + I2C (Inky needs both; SPI with no chip-select)..."
-sudo raspi-config nonint do_spi 0
-sudo raspi-config nonint do_i2c 0
+if [ "$(sudo raspi-config nonint get_spi 2>/dev/null || echo 1)" = 0 ] \
+   && [ "$(sudo raspi-config nonint get_i2c 2>/dev/null || echo 1)" = 0 ]; then
+  echo "     SPI + I2C already enabled."
+else
+  sudo raspi-config nonint do_spi 0
+  sudo raspi-config nonint do_i2c 0
+fi
 grep -q "^dtoverlay=spi0-0cs" "$CONFIG_TXT" || echo "dtoverlay=spi0-0cs" | sudo tee -a "$CONFIG_TXT" >/dev/null
 
 echo "2/5  Installing system packages (build tools to compile spidev, libatlas3-base for numpy)..."
-sudo apt-get update -qq
-sudo apt-get install -y python3-venv python3-dev build-essential libatlas3-base
+APT_PKGS="python3-venv python3-dev build-essential libatlas3-base"
+MISSING_PKGS=""
+for pkg in $APT_PKGS; do
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed" \
+    || MISSING_PKGS="$MISSING_PKGS $pkg"
+done
+if [ -z "$MISSING_PKGS" ]; then
+  echo "     All present, skipping apt."
+else
+  # Only refresh the package lists when there is actually something to fetch.
+  sudo apt-get update -qq
+  sudo apt-get install -y $MISSING_PKGS
+fi
 
 echo "3/5  Creating venv and installing Python deps..."
-python3 -m venv .venv
-.venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -r requirements-frame.txt
+if [ -x .venv/bin/pip ]; then
+  echo "     venv already exists, reusing it."
+else
+  python3 -m venv .venv
+fi
+# Stamp the requirements hash into the venv: pip re-resolving an already-satisfied
+# requirements file costs ~30s on a Zero 2 W and changes nothing.
+REQ_STAMP=".venv/.requirements-frame.sha"
+REQ_SHA="$(sha256sum requirements-frame.txt | cut -d' ' -f1)"
+if [ "$(cat "$REQ_STAMP" 2>/dev/null || true)" = "$REQ_SHA" ]; then
+  echo "     Python deps already match requirements-frame.txt, skipping."
+else
+  .venv/bin/pip install -q --upgrade pip
+  .venv/bin/pip install -q -r requirements-frame.txt
+  printf '%s\n' "$REQ_SHA" > "$REQ_STAMP"
+fi
 if [ "$NEEDS_BROWSER" = 1 ]; then
-  echo "     Installing Playwright + Chromium so the Pi can render the collage (a few minutes)..."
-  .venv/bin/pip install -q playwright
-  sudo .venv/bin/playwright install-deps chromium
-  .venv/bin/playwright install chromium
+  # Chromium unpacks to ~/.cache/ms-playwright/chromium-<build>; if a build is
+  # there and the module imports, the download and the apt dep pass are both done.
+  HAVE_CHROMIUM=0
+  for d in "$HOME"/.cache/ms-playwright/chromium-*; do
+    if [ -d "$d" ]; then HAVE_CHROMIUM=1; break; fi
+  done
+  if [ "$HAVE_CHROMIUM" = 1 ] && .venv/bin/python -c 'import playwright' 2>/dev/null; then
+    echo "     Playwright + Chromium already installed, skipping."
+  else
+    echo "     Installing Playwright + Chromium so the Pi can render the collage (a few minutes)..."
+    .venv/bin/pip install -q playwright
+    sudo .venv/bin/playwright install-deps chromium
+    .venv/bin/playwright install chromium
+  fi
 fi
 
 echo "4/5  Writing config..."
@@ -125,13 +168,11 @@ shoot_subtitle = "Heard Today"
 bird_names = true
 fresh_minutes = 30   # outline a bird heard this recently; 0 turns the mark off
 fade_hours = 24      # silence before a bird fades; inert until hours is widened
-# Taken the matboard out? These seven give the bare panel a full-size collage,
-# and a second day of birds fading out behind the first:
+# Taken the matboard out? These five hand the whole extra opening to the birds
+# (the text stays the size it is), plus a second day fading out behind them:
 # opening = 0.97
 # opening_aspect = 0.75
-# title_frac = 0.10
 # collage_frac = 0.98
-# gap_frac = 0.05
 # shoot_collage_vh = 74
 # hours = 48
 rotate = 90          # flip to 270 if the frame hangs the other way up
@@ -153,13 +194,11 @@ elif [ "$MODE" = image ]; then
     printf '%s\n' 'shoot = false'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Taken the matboard out? These seven give the bare panel a full-size collage,"
-    printf '%s\n' "# and a second day of birds fading out behind the first:"
+    printf '%s\n' "# Taken the matboard out? These five hand the whole extra opening to the birds"
+    printf '%s\n' "# (the text stays the size it is), plus a second day fading out behind them:"
     printf '%s\n' "# opening = 0.97"
     printf '%s\n' "# opening_aspect = 0.75"
-    printf '%s\n' "# title_frac = 0.10"
     printf '%s\n' "# collage_frac = 0.98"
-    printf '%s\n' "# gap_frac = 0.05"
     printf '%s\n' "# shoot_collage_vh = 74"
     printf '%s\n' "# hours = 48"
   } > "$CONFIG.new"
@@ -181,13 +220,11 @@ else
     printf '%s\n' 'bird_names = true'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Taken the matboard out? These seven give the bare panel a full-size collage,"
-    printf '%s\n' "# and a second day of birds fading out behind the first:"
+    printf '%s\n' "# Taken the matboard out? These five hand the whole extra opening to the birds"
+    printf '%s\n' "# (the text stays the size it is), plus a second day fading out behind them:"
     printf '%s\n' "# opening = 0.97"
     printf '%s\n' "# opening_aspect = 0.75"
-    printf '%s\n' "# title_frac = 0.10"
     printf '%s\n' "# collage_frac = 0.98"
-    printf '%s\n' "# gap_frac = 0.05"
     printf '%s\n' "# shoot_collage_vh = 74"
     printf '%s\n' "# hours = 48"
   } > "$CONFIG.new"

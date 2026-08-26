@@ -416,3 +416,87 @@ def test_unknown_key_is_refused_rather_than_ignored():
     point of the flag is checking whether a setting did anything."""
     with pytest.raises(ValueError):
         display.apply_overrides(dict(display.DEFAULTS), ["fresh_minute=0"])
+
+
+# --- text is a physical size, not a share of the opening --------------------
+def title_height(opening, aspect, title_frac):
+    """What mat_and_center will scale the title band to."""
+    _, oh = display.opening_size(opening, aspect)
+    return min(display.PANEL_H * title_frac, oh * 0.30)
+
+
+def test_one_title_fraction_holds_the_title_still_across_openings():
+    """A title is legible from across the room or it is not, and that has
+    nothing to do with how much glass the mat leaves showing. The same number
+    has to give the same physical title on both shipped openings."""
+    tf = display.DEFAULTS["title_frac"]
+    a5 = title_height(0.7071, 0.7071, tf)
+    bare = title_height(0.97, 0.75, tf)
+    assert a5 == pytest.approx(bare, rel=0.01)
+    # and it is still the height the A5 mat has always produced
+    assert a5 == pytest.approx(display.PANEL_H * 0.7071 * 0.065, rel=0.02)
+
+
+def test_a_tiny_opening_cannot_be_swallowed_by_its_own_title():
+    _, oh = display.opening_size(0.2, 0.7071)
+    assert title_height(0.2, 0.7071, display.DEFAULTS["title_frac"]) <= oh * 0.30
+
+
+def test_the_larger_opening_gives_its_extra_room_to_the_birds():
+    """The point of the bare panel: title and gap are unchanged in absolute px,
+    so everything the opening gained lands in the collage."""
+    def collage_area(opening, aspect, collage_frac):
+        ow, oh = display.opening_size(opening, aspect)
+        tf, gf = display.DEFAULTS["title_frac"], display.DEFAULTS["gap_frac"]
+        return ow * collage_frac * (oh - min(display.PANEL_H * tf, oh * 0.30)
+                                    - min(display.PANEL_H * gf, oh * 0.20))
+    assert collage_area(0.97, 0.75, 0.98) / collage_area(0.7071, 0.7071, 0.66) > 3.0
+
+
+# --- the names hold their size too ------------------------------------------
+def test_label_scale_is_one_for_the_shipped_default():
+    """The A5 mat is the reference, so nothing is rescaled there."""
+    assert display.label_scale(dict(display.DEFAULTS)) == pytest.approx(1.0, rel=0.02)
+
+
+def test_label_scale_cancels_the_bare_panels_scale_up():
+    bare = {**display.DEFAULTS, "opening": 0.97, "opening_aspect": 0.75, "collage_frac": 0.98}
+    scale = display.label_scale(bare)
+    # the collage is scaled up by 1/scale on its way to the panel, so the type
+    # has to come down by exactly that much to end up the same size
+    assert scale == pytest.approx(display.LABEL_REFERENCE_SCALE / display.collage_scale(bare))
+    assert 0.4 < scale < 0.55
+    # net effect: a name is the same physical size on both openings
+    a5 = display.label_scale(dict(display.DEFAULTS)) * display.collage_scale(dict(display.DEFAULTS))
+    assert scale * display.collage_scale(bare) == pytest.approx(a5, rel=0.02)
+
+
+def test_label_scale_never_enlarges():
+    """A smaller-than-A5 opening would want type bigger than the tile can carry;
+    apt.js's own cap is the better judge of that than a ratio is."""
+    small = {**display.DEFAULTS, "opening": 0.4}
+    assert display.label_scale(small) == 1.0
+
+
+def test_label_scale_can_be_overridden():
+    assert display.label_scale({**display.DEFAULTS, "label_scale": 1.5}) == 1.5
+
+
+# --- shoot's apt.js rewrites must still find their targets ------------------
+def test_every_apt_js_rewrite_still_matches():
+    """shoot.py refuses to ship a half-tuned frame: if any of these patterns
+    stops matching it raises and the panel keeps yesterday's picture. They are
+    regexes against someone else's source file, so they need a guard."""
+    import ast
+    import re as _re
+    src = (FRAME / "shoot.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_make_js_handler")
+    patterns = [pair.elts[0].value for node in ast.walk(fn)
+                if isinstance(node, ast.Tuple)
+                for pair in node.elts
+                if isinstance(pair, ast.Tuple) and len(pair.elts) == 2
+                and isinstance(pair.elts[0], ast.Constant) and isinstance(pair.elts[0].value, str)]
+    assert len(patterns) >= 6, f"only found {len(patterns)} rewrite patterns"
+    for pat in patterns:
+        assert _re.search(pat, APT_JS), f"apt.js no longer matches {pat!r}"

@@ -86,15 +86,27 @@ DEFAULTS = {
     # 1200x1600 - and wants the four numbers below moved with it.
     "opening": 0.7071,
     "opening_aspect": 0.7071,
-    # How the title and collage divide the opening. Fractions rather than
-    # pixels so one set of numbers covers the bare panel and any mat cut for
-    # it: title_frac and gap_frac are of the opening's height, collage_frac of
-    # its width. Raising the opening without raising these would only move the
-    # same small content further apart, which is why they are config and not
-    # constants.
-    "title_frac": 0.065,
+    # How the title and collage divide the opening.
+    #
+    # title_frac and gap_frac are fractions of the PANEL, not of the opening.
+    # Type is a physical size - a title is legible from across the room or it
+    # is not, and that has nothing to do with how much of the glass the mat
+    # leaves showing. Measured against the opening, a bigger opening enlarged
+    # the title with it, which is exactly the room a bigger opening was opened
+    # up to give the birds. Against the panel, one number holds the title at
+    # 74px whatever is cut in front of it, and the whole of the extra opening
+    # goes to the collage. 0.046 and 0.071 are what the A5 mat always produced.
+    #
+    # collage_frac is a fraction of the opening's WIDTH, and stays that way:
+    # the collage is the thing that is supposed to grow with the opening.
+    "title_frac": 0.046,
     "collage_frac": 0.66,
-    "gap_frac": 0.1,
+    "gap_frac": 0.071,
+    # Type size for the bird names, as a multiplier on what the tile asks for.
+    # 0 holds the handwriting at the physical size the A5 mat gives it, whatever
+    # the opening, by cancelling out the collage's own scale-up - see
+    # label_scale(). A positive value overrides that outright.
+    "label_scale": 0,
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
@@ -333,7 +345,12 @@ def _centroid_x(img, paper):
 # opening height. These are the shipped defaults; every one is a config key,
 # because a bare panel and an A5 mat want very different numbers and the whole
 # point of enlarging the opening is that the content grows with it.
-TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.065, 0.66, 0.1
+TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.046, 0.66, 0.071
+
+# The collage scale factor the A5 mat produces. That is the layout apt.js's
+# handwriting sizes were chosen against, so it is what "the size the names have
+# always been" means. See label_scale().
+LABEL_REFERENCE_SCALE = 0.44
 
 
 def layout_of(cfg):
@@ -350,6 +367,37 @@ def layout_of(cfg):
         "collage": _frac(cfg.get("collage_frac", COLLAGE_FRAC), "collage_frac"),
         "gap": _frac(cfg.get("gap_frac", GAP_FRAC), "gap_frac"),
     }
+
+
+def collage_scale(cfg):
+    """How much the collage is shrunk on its way to the panel, in the
+    width-bound case that decides it in practice. The shot is rendered at panel
+    width, so the source collage is PANEL_W across and this is just the share of
+    that width the opening hands back to it."""
+    lay = layout_of(cfg)
+    ow, _ = opening_size(lay["opening"], lay["aspect"])
+    return ow * (1 - lay["mat"]) * lay["collage"] / PANEL_W
+
+
+def label_scale(cfg):
+    """What to multiply the bird names' type size by, so that a name is the same
+    physical size on the panel whatever the opening.
+
+    The names are sized from their tile inside the browser, and the whole
+    collage is then scaled onto the panel - so opening the mat up, which scales
+    the collage less, silently enlarged the type along with the birds. That is
+    the opposite of the point: a name is legible or it is not, and the room a
+    larger opening buys belongs to the drawings. Cancelling the collage's own
+    scale-up holds the type still and hands that room over.
+
+    Only ever shrinks. An opening smaller than the A5 reference would want type
+    larger than the tile can carry, and apt.js's own cap is the better judge of
+    that than a ratio is."""
+    override = cfg.get("label_scale") or 0
+    if override > 0:
+        return float(override)
+    scale = collage_scale(cfg)
+    return min(1.0, LABEL_REFERENCE_SCALE / scale) if scale > 0 else 1.0
 
 
 def mat_and_center(img, mat, opening, aspect=0.75,
@@ -383,8 +431,12 @@ def mat_and_center(img, mat, opening, aspect=0.75,
     box_w, box_h = ow * (1 - mat), oh * (1 - mat)
     if not (tb and cb):
         return _place(img.crop(full), paper, mat, opening, aspect)
-    title = _scale_h(img.crop(tb), box_h * title_frac)
-    gap = round(box_h * gap_frac)
+    # Both measured against the panel, so the title and the space under it are
+    # the same physical size whatever the opening. Clamped against the opening
+    # all the same: a small enough mat could otherwise ask for a title taller
+    # than the window it has to sit in.
+    title = _scale_h(img.crop(tb), min(PANEL_H * title_frac, box_h * 0.30))
+    gap = round(min(PANEL_H * gap_frac, box_h * 0.20))
     # Size the collage to fill the room left under the fixed-size title,
     # binding on whichever of width or remaining height runs out first, so the
     # title stays a consistent size whether the collage is tall or compact
@@ -526,7 +578,8 @@ def obtain_image(cfg, species=None):
               small_floor=cfg["shoot_small_floor"], count_exp=cfg["shoot_count_exp"], timeout_ms=cfg["timeout"] * 1000,
               user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
               bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
-              fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"])
+              fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
+              label_scale=label_scale(cfg))
         return Image.open(out).convert("RGB")
     src = cfg["image_url"] or cfg["image"]
     if not src:
@@ -612,6 +665,13 @@ def _toml_error(path, exc):
             out.append(" " * (len(prefix) + col - 1) + "^")
     out.append('  Text needs "double quotes"; true/false and numbers go bare. '
                "A # starts a comment.")
+    if where and 0 < int(where.group(1)) <= len(lines):
+        bad = lines[int(where.group(1)) - 1]
+        if re.search(r"=\s*(on|off|yes|no)\s*$", bad, re.I):
+            out.append("  TOML has no on/off - write true or false.")
+        if re.match(r"\s*birdframe-\w+\s*=", bad):
+            out.append("  birdframe-names is a command you run in a shell, not a setting. "
+                       "Delete this line; names are on by default.")
     return "\n".join(out)
 
 
@@ -622,9 +682,16 @@ def load_config(path):
     path = os.path.expanduser(path)
     try:
         with open(path, "rb") as f:
-            cfg.update(tomllib.load(f))
+            loaded = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(_toml_error(path, exc)) from exc
+    # A misspelled key parses perfectly well and then does nothing at all, which
+    # from the outside is indistinguishable from the setting having no effect.
+    # Name them rather than let someone wonder why nothing changed.
+    unknown = sorted(k for k in loaded if k not in DEFAULTS)
+    if unknown:
+        print(f"{path}: ignoring unknown setting(s): {', '.join(unknown)}", file=sys.stderr)
+    cfg.update(loaded)
     return cfg
 
 

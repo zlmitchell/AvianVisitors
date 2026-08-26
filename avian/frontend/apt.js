@@ -684,6 +684,15 @@
   var LABEL_NEAR = 2;       // px of paper between silhouette and letters
   var LABEL_MIN_PX = 9;     // below this the handwriting stops reading
   var LABEL_MAX_PX = 21;
+  // Multiplies the type size a tile asks for. 1 on the website. The e-ink frame
+  // rewrites it at capture time: the collage is drawn here and then scaled onto
+  // the panel, so a larger mat opening - which scales it less - would enlarge
+  // every name along with the birds. The frame cancels that out so a name is
+  // the same physical size on the wall whatever is cut in front of the panel,
+  // and the room a larger opening buys goes to the drawings instead of to the
+  // lettering. The packer reserves the lettering's box, so smaller names also
+  // let the flock nest tighter.
+  var LABEL_SCALE = 1;
   var LABEL_ASC = 0.80;     // Caveat's inked em band, above the baseline
   var LABEL_DESC = 0.25;    // and below it
   // Most ink one letter-width of a name may sit on: a shade above nothing.
@@ -874,7 +883,7 @@
   // even sought. Keying on the longer side instead would let that same
   // heron take larger type than a dove twice its area.
   function labelCap(W, H) {
-    return Math.round(Math.min(LABEL_MAX_PX, Math.sqrt(W * H) * 0.16));
+    return Math.round(Math.min(LABEL_MAX_PX, Math.sqrt(W * H) * 0.16) * LABEL_SCALE);
   }
 
   // Trace the silhouette's outline in order (Moore boundary walk). A

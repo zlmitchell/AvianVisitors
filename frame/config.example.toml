@@ -87,26 +87,41 @@ mat = 0.0              # extra shrink of the content inside the opening (0 = non
 opening = 0.7071
 opening_aspect = 0.7071
 
-# How the title and collage divide the opening: title_frac and gap_frac are of
-# its height, collage_frac of its width. Raising `opening` without raising
-# these only spreads the same small content further apart, which is why they
-# are here and not baked in.
-title_frac = 0.065
+# How the title and collage divide the opening.
+#
+# title_frac and gap_frac are fractions of the PANEL, not of the opening. Type
+# is a physical size - a title is legible across the room or it is not, and
+# that has nothing to do with how much glass the mat leaves showing. Measured
+# against the opening, a larger opening enlarged the title with it, which is
+# exactly the room the larger opening existed to give the birds. Against the
+# panel, one number holds the title at 74px and the space under it at 113px
+# whatever is cut in front, and every extra pixel of opening goes to the
+# collage. These two are what the A5 mat always produced.
+title_frac = 0.046
+gap_frac = 0.071
+
+# collage_frac is a share of the opening's WIDTH, and stays that way: the
+# collage is the thing that is meant to grow with the opening.
 collage_frac = 0.66
-gap_frac = 0.1
+
+# Bird-name type size, as a multiplier on what the tile asks for. 0 holds the
+# handwriting at the physical size the A5 mat gives it whatever the opening, by
+# cancelling out the collage's own scale-up on its way to the panel. A positive
+# value overrides that outright.
+# label_scale = 0
 
 # ---- Taken the matboard out? -----------------------------------------------
-# The bare panel is 94% of the glass instead of 47%, which is 2.16x linear on
-# the title, the names and the birds. These seven go together: the opening, the
-# four fractions that fill it, the render height that gives the birds enough
-# source pixels to be drawn at that size, and the second day of birds that the
-# extra room can now afford to carry (which is also what switches the fade on).
+# The bare panel is 94% of the glass instead of 47%. The TEXT does not grow with
+# it - title_frac and gap_frac are fractions of the panel, and the bird names
+# have their own scale-up cancelled out (see label_scale) - so all of the extra
+# room lands on the birds: 3.1x the collage area. These five go together: the
+# opening, the share of it the collage fills, the render height that gives the
+# birds enough source pixels at that size, and the second day of birds the extra
+# room can now afford to carry (which is also what switches the fade on).
 #
 # opening = 0.97
 # opening_aspect = 0.75    # the panel's own 1200x1600
-# title_frac = 0.10
 # collage_frac = 0.98
-# gap_frac = 0.05
 # shoot_collage_vh = 74
 # hours = 48
 # panel = "el133uf1"   # force the 13.3" driver if auto-detect ever fails

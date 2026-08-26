@@ -73,28 +73,30 @@ On a **first** install SPI is not up yet, so it reboots and the timer draws the 
 
 A default install draws into the **A5 window of the A4 frame from the BOM** — what an unmodified kit has in front of the panel. That window covers 47% of the glass, and it is the default because anything larger prints under the matboard.
 
-**Take the matboard out** and the collage can run to the glass: 94% of the panel, the collage going from 528px to 1141px wide, **2.16x linear** on the title, the names and the birds. Seven keys go together, and they are already in `~/.birdframe/config.toml` commented out:
+**Take the matboard out** and the collage runs to the glass: 94% of the panel instead of 47%. Five keys go together, and they are already in `~/.birdframe/config.toml` commented out:
 
 | Key | A5 mat (default) | Bare panel |
 |-----|------------------|------------|
 | `opening` | `0.7071` | `0.97` |
 | `opening_aspect` | `0.7071` | `0.75` (the panel's own 1200x1600) |
-| `title_frac` | `0.065` | `0.10` |
 | `collage_frac` | `0.66` | `0.98` |
-| `gap_frac` | `0.1` | `0.05` |
 | `shoot_collage_vh` | `52` | `74` |
 | `hours` | `24` | `48` |
 
-`opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes the bare panel and any mat you cut for one. `title_frac` and `gap_frac` are fractions of the opening's height, `collage_frac` of its width. `shoot_collage_vh` decides how many source pixels the birds are drawn with before being resampled onto the panel — 52 suits the small opening, 74 the large one, and much past 76 the title runs out of viewport.
+**The text does not change size — the birds do.** `title_frac` and `gap_frac` are fractions of the *panel*, not of the opening, so one value holds the title at 74px and the space under it at 113px whatever is cut in front of the glass. The bird names hold still too: they are sized from their tile inside the browser and the whole collage is then scaled onto the panel, so a larger opening would have quietly enlarged every name along with the birds. The frame cancels that scale-up out — `label_scale`, derived from the opening, or set it to a positive number to override. All of the extra room therefore lands on the drawings: **3.1x the collage area**.
 
-**Move all seven or none.** Raising `opening` on its own leaves the content the size it always was, just further apart — that is what the four fractions are for. And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
+`opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes the bare panel and any mat you cut for one. `collage_frac` is the share of the opening's width the collage fills. `shoot_collage_vh` decides how many source pixels the birds are drawn with before being resampled onto the panel — 52 suits the small opening, 74 the large one, and much past 76 the title runs out of viewport.
+
+**Move all five or none.** And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
+
+One trade worth knowing: holding the names still means the browser rasterises them at about half the pixel size it used to, because there is much less downscale afterwards to sharpen them. On the bare panel they are a shade less crisp than the same physical size in the A5 mat. Raising `dsf` would fix it, at a memory cost a Zero 2 W does not have.
 
 Check it before you cut anything: `display.py --preview out.png --mat-box` writes an approximate six-ink dither with the opening outlined in red, on any machine, no panel needed.
 
 Any config value can be overridden for one run with `-o key=value`, repeatable, without touching `config.toml` — which is how to try the bare panel on the real thing before committing to it:
 
 ```bash
-display.py --config ~/.birdframe/config.toml --force -o opening=0.97 -o opening_aspect=0.75 -o title_frac=0.10 -o collage_frac=0.98 -o gap_frac=0.05 -o shoot_collage_vh=74 -o hours=48
+display.py --config ~/.birdframe/config.toml --force -o opening=0.97 -o opening_aspect=0.75 -o collage_frac=0.98 -o shoot_collage_vh=74 -o hours=48
 ```
 
 An unknown key is an error rather than a silent no-op, so a typo cannot look like "that setting does nothing".
@@ -111,6 +113,8 @@ birdframe-names off
 ```
 
 Either one saves the preference and requests an immediate refresh.
+
+Those are **commands you run in a shell on the Pi**, not lines for `config.toml`. The setting they write is `bird_names = true`; putting `birdframe-names = on` in the config file makes it invalid TOML and the frame refuses to start (it will say so, and name the line).
 
 For an `--image-url` frame there is no local render to change, so the frame instead asks its source for what it wants: `labels=1`/`labels=0`, `fresh=<minutes>` and `fade=<start>-<end>` go on the source URL. The source has to honor them, or its image will not change.
 
