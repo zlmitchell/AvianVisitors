@@ -464,8 +464,8 @@ def test_label_scale_cancels_the_bare_panels_scale_up():
     scale = display.label_scale(bare)
     # the collage is scaled up by 1/scale on its way to the panel, so the type
     # has to come down by exactly that much to end up the same size
-    assert scale == pytest.approx(display.LABEL_REFERENCE_SCALE / display.collage_scale(bare))
-    assert 0.4 < scale < 0.55
+    assert scale == pytest.approx(display.reference_scale() / display.collage_scale(bare))
+    assert 0.5 < scale < 0.8
     # net effect: a name is the same physical size on both openings
     a5 = display.label_scale(dict(display.DEFAULTS)) * display.collage_scale(dict(display.DEFAULTS))
     assert scale * display.collage_scale(bare) == pytest.approx(a5, rel=0.02)
@@ -532,3 +532,12 @@ def test_the_collage_actually_fills_its_opening():
     ow, oh = display.opening_size(display.DEFAULTS["opening"], display.DEFAULTS["opening_aspect"])
     used = ow * display.DEFAULTS["collage_frac"]
     assert used <= ow - 24, "leave some paper inside the mat window"
+
+
+def test_the_name_reference_tracks_the_shipped_default():
+    """reference_scale is a fact about the default layout, not a constant. If it
+    were written down, the next time a default moved it would quietly rescale
+    every name on a plain matted frame - which is exactly what raising
+    collage_frac did before this was derived."""
+    assert display.reference_scale() == pytest.approx(display.collage_scale(display.DEFAULTS))
+    assert display.label_scale(dict(display.DEFAULTS)) == pytest.approx(1.0)

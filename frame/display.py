@@ -355,11 +355,6 @@ def _centroid_x(img, paper):
 # point of enlarging the opening is that the content grows with it.
 TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.046, 0.92, 0.071
 
-# The collage scale factor the A5 mat produces. That is the layout apt.js's
-# handwriting sizes were chosen against, so it is what "the size the names have
-# always been" means. See label_scale().
-LABEL_REFERENCE_SCALE = 0.44
-
 
 def layout_of(cfg):
     """Everything mat_and_center needs, pulled out of config. Every fraction is
@@ -387,6 +382,19 @@ def collage_scale(cfg):
     return ow * (1 - lay["mat"]) * lay["collage"] / PANEL_W
 
 
+def reference_scale():
+    """The collage scale the shipped default produces - the layout the
+    handwriting is judged against, and so what "the size the names normally
+    are" means.
+
+    Derived from DEFAULTS rather than frozen as a number, because it is a fact
+    about the default layout and not a constant of its own. Written down it goes
+    stale the first time a default moves, and it moves silently: raising
+    collage_frac once already turned this into a 0.72 that would have shrunk
+    every name on a plain matted frame."""
+    return collage_scale(DEFAULTS)
+
+
 def label_scale(cfg):
     """What to multiply the bird names' type size by, so that a name is the same
     physical size on the panel whatever the opening.
@@ -405,7 +413,7 @@ def label_scale(cfg):
     if override > 0:
         return float(override)
     scale = collage_scale(cfg)
-    return min(1.0, LABEL_REFERENCE_SCALE / scale) if scale > 0 else 1.0
+    return min(1.0, reference_scale() / scale) if scale > 0 else 1.0
 
 
 def mat_and_center(img, mat, opening, aspect=0.75,
