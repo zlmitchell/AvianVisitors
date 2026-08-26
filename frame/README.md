@@ -83,16 +83,19 @@ once when you save:
 birdframe
 ```
 
-Arrows move, left/right or space changes a switch, enter types a value, `d` puts
-one back to its default, `p` writes a preview PNG without touching the panel,
-`s` saves. Nothing reaches the config until you save, and nothing reaches the
+Settings are listed by what they do — `bird names`, `birds fill`, `which way up` —
+with the TOML key on the help line at the bottom, and read out in the terms you'd
+say them in (`92% of the opening`, `24 h`, `off`). The count top-right (`1/41`)
+is how many there are; the screen scrolls. Arrows move, PgDn/PgUp page, space or
+left/right changes a switch, enter types a value, `d` puts one back to its
+default, `p` writes a preview PNG without touching the panel, `s` saves. Nothing reaches the config until you save, and nothing reaches the
 panel unless something actually changed — a refresh is 1–2 minutes on a Zero 2 W,
 so it is worth spending only once.
 
 Three things it does that hand-editing does not:
 
-- **The layout preset.** The five keys in the table below move as one row, not as
-  five edits that are only correct together.
+- **The matboard row.** First row on the screen. The five keys in the table below
+  move as one choice, not as five edits that are only correct together.
 - **Switching source after install** — `birdnet.local`, BirdWeather, or a
   ready-made PNG. `install.sh` refuses to do this to an existing config.
 - **The refresh.** Otherwise the panel keeps the picture it has until a bird
@@ -127,7 +130,7 @@ A default install draws into the **A5 window of the A4 frame from the BOM** — 
 
 `opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes the bare panel and any mat you cut for one. `collage_frac` is the share of the opening's width the collage fills. `shoot_collage_vh` decides how many source pixels the birds are drawn with before being resampled onto the panel — 52 suits the small opening, 74 the large one, and much past 76 the title runs out of viewport.
 
-**Move all five or none** — which is what the `layout preset` row in `birdframe` is for; it is the top row of the Panel section and flips the whole table in one keypress. And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
+**Move all five or none** — which is what the `matboard` row in `birdframe` is for. It is the first row on the screen, reads `with mat` / `no mat`, and flips the whole table in one keypress. And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
 
 One trade worth knowing: holding the names still means the browser rasterises them at about half the pixel size it used to, because there is much less downscale afterwards to sharpen them. On the bare panel they are a shade less crisp than the same physical size in the A5 mat. Raising `dsf` would fix it, at a memory cost a Zero 2 W does not have.
 

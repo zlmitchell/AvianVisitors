@@ -146,13 +146,61 @@ RANGES = {
 # switches the fade on). config.example.toml spends fifteen lines saying they
 # move together; here they are one row.
 PRESETS = [
-    ("A5 mat (an unmodified kit)", {
+    ("with mat  (an unmodified kit)", {
         "opening": 0.7071, "opening_aspect": 0.7071, "collage_frac": 0.92,
         "shoot_collage_vh": 52, "hours": 24}),
-    ("bare panel (matboard taken out)", {
+    ("no mat  (matboard taken out)", {
         "opening": 0.97, "opening_aspect": 0.75, "collage_frac": 0.98,
         "shoot_collage_vh": 74, "hours": 48}),
 ]
+
+# What each setting is called on the screen. The TOML key is what the config
+# file and the README use, so it stays - on the help line, for the selected
+# row - but it is not what someone is looking for when they want to turn the
+# names off. Anything unlisted falls back to its key with the underscores out.
+LABELS = {
+    "species_source": "birds come from", "base_url": "bird mic address",
+    "shoot": "draw the collage here", "image": "read a PNG from",
+    "image_url": "fetch a PNG from", "zip": "ZIP / postal code",
+    "bw_days": "BirdWeather lookback", "bw_country": "country for the ZIP",
+    "hours": "show birds from the last",
+    "shoot_title": "title", "shoot_subtitle": "subtitle",
+    "bird_names": "bird names", "shoot_lowercase": "title in lower case",
+    "shoot_headline_px": "title size", "shoot_eyebrow_px": "subtitle size",
+    "shoot_mat": "padding round the birds", "shoot_small_floor": "smallest bird",
+    "shoot_count_exp": "loud birds dominate", "shoot_collage_vh": "drawn at",
+    "fresh_minutes": "outline birds heard within", "fade_hours": "start fading after",
+    "rotate": "which way up", "saturation": "colour strength",
+    "panel": "panel driver", "mat": "extra inset",
+    "opening": "opening height", "opening_aspect": "opening shape",
+    "title_frac": "title height", "title_position": "title sits at",
+    "collage_frac": "birds fill", "gap_frac": "space under the title",
+    "label_scale": "name size",
+    "quiet_start": "quiet from", "quiet_end": "quiet until",
+    "heal_hours": "redraw at least every",
+    "state": "state file", "cache": "working folder", "timeout": "give up after",
+    "basic_user": "basic-auth user", "basic_pass": "basic-auth password",
+}
+
+# A fraction is unreadable as a fraction. Each of these is shown as a
+# percentage of the thing it is a share OF, because "0.92" answers a question
+# nobody asked and "92% of the opening" answers the one they did.
+PERCENT_OF = {
+    "opening": "of the panel height", "collage_frac": "of the opening",
+    "title_frac": "of the panel", "gap_frac": "of the panel",
+    "mat": "inset", "shoot_mat": "of the collage",
+    "shoot_small_floor": "of the collage", "saturation": "",
+    "shoot_collage_vh": "of the render",
+}
+# shoot_collage_vh is already 0-100; the rest are 0-1 and need scaling.
+ALREADY_PERCENT = {"shoot_collage_vh"}
+UNITS = {"hours": "h", "fade_hours": "h", "heal_hours": "h",
+         "fresh_minutes": "min", "timeout": "s", "bw_days": "days",
+         "shoot_headline_px": "px", "shoot_eyebrow_px": "px"}
+
+
+def label_of(key):
+    return LABELS.get(key, key.replace("_", " "))
 
 
 def sections(defaults=None):
@@ -204,6 +252,12 @@ def parse_value(key, raw):
             number = float(raw)
         except ValueError:
             raise ValueError(f"{key} wants a number, got {raw!r}") from None
+        # A percentage where the file wants a fraction. Every key the screen
+        # reads out as a percentage is capped at 1.0 by validation, so a value
+        # above 1 can only have been meant as one - which is what lets the row
+        # say "92% of the opening" and the prompt take 92 back.
+        if key in PERCENT_OF and key not in ALREADY_PERCENT and number > 1:
+            number = number / 100
         default = DEFAULTS.get(key)
         if isinstance(default, int) and not isinstance(default, bool) and number.is_integer():
             return int(number)
@@ -253,24 +307,56 @@ SECRETS = {"basic_pass"}
 
 
 def show_value(value, key=None):
-    """A value for the screen: as the file has it, minus the quoting noise."""
+    """A value for the screen, in the terms someone would say it in. The file
+    keeps the number; this is only how it is read out."""
     if value is None or value == "":
         return "-"
     if key in SECRETS:
         return "set"
     if isinstance(value, bool):
         return "on" if value else "off"
+    # The zeroes that mean a word rather than a quantity.
+    if key == "fresh_minutes" and not value:
+        return "off"
+    if key == "label_scale" and not value:
+        return "as the mat gives it"
+    if key == "mat" and not value:
+        return "none"
+    if key == "rotate":
+        return f"{value:g} degrees"
+    if key == "opening_aspect":
+        return f"{value:g} wide to 1 tall"
+    if key in ("quiet_start", "quiet_end"):
+        return f"{int(value):02d}:00"
+    if key in PERCENT_OF and isinstance(value, (int, float)):
+        pct = value if key in ALREADY_PERCENT else value * 100
+        return f"{pct:.4g}% {PERCENT_OF[key]}".strip()
+    if key in UNITS:
+        return f"{value:g} {UNITS[key]}"
     if isinstance(value, float):
         return f"{value:g}"
     return str(value)
 
 
-def edit_text(value):
+def written_value(key, value):
+    """A change as the file will show it. The summaries after a save read as
+    config lines, so they quote the value the way config.toml does rather than
+    the way the screen reads it out."""
+    if key in SECRETS and value:
+        return "set"
+    rendered = render_value(value)
+    return "unset" if rendered is None else rendered
+
+
+def edit_text(value, key=None):
     """The same value as something to type over. Not show_value: that renders
     an empty setting as a dash, and handing someone a dash to edit puts a
-    literal one in the file."""
+    literal one in the file. A key the screen reads out as a percentage is
+    handed back as one, so what you edit is what you were just shown."""
     if value is None:
         return ""
+    if key in PERCENT_OF and key not in ALREADY_PERCENT and isinstance(value, (int, float)):
+        return f"{value * 100:g}"
     if isinstance(value, float):
         return f"{value:g}"
     return str(value)
@@ -520,13 +606,15 @@ def run_refresh(config_path):
 
 # --- the screen --------------------------------------------------------------
 def build_rows():
-    """Flat row list for the screen: section headers, the preset row at the top
-    of the layout section, then one row per key."""
-    rows = []
+    """Flat row list for the screen: section headers, then one row per key.
+
+    The mat goes first, on its own, above everything. It is the choice people
+    open this screen to make and it decides five other rows, and buried in the
+    panel section it sat off the bottom of an 80x24 ssh window - which looked
+    exactly like it not being there."""
+    rows = [("header", "Matboard - the one that moves the rest"), ("preset", "layout")]
     for title, keys in sections():
         rows.append(("header", title))
-        if title.startswith("Panel"):
-            rows.append(("preset", "layout"))
         rows.extend(("field", key) for key in keys)
     return rows
 
@@ -595,7 +683,12 @@ def _draw(stdscr, editor, palette):
     changes = editor.changes
     count = len(changes)
     header = f" birdframe config  {editor.path}"
-    tail = f"{count} unsaved change{'' if count == 1 else 's'} " if count else "no changes "
+    # "12/41" is the only thing on screen that says there is anything below the
+    # last visible row. Without it a short window looks like the whole list.
+    fields = [i for i, (shape, _) in enumerate(editor.rows) if shape != "header"]
+    place = f"{fields.index(editor.index) + 1}/{len(fields)}"
+    tail = (f"{place}  {count} unsaved change{'' if count == 1 else 's'} "
+            if count else f"{place} ")
     stdscr.attron(palette["header"])
     stdscr.addnstr(0, 0, header.ljust(width)[:width], width)
     if width > len(tail):
@@ -615,33 +708,36 @@ def _draw(stdscr, editor, palette):
             continue
         selected = position == editor.index
         if shape == "preset":
-            name = preset_name(editor.values) or "custom"
-            label, text = "layout preset", name
+            label = "matboard"
+            text = preset_name(editor.values) or "custom"
             mark = " "
         else:
-            label = key
+            label = label_of(key)
             text = show_value(editor.values.get(key), key)
             mark = "*" if key in changes else " "
         attr = palette["selected"] if selected else (
             palette["changed"] if mark == "*" else curses.A_NORMAL)
-        line = f" {mark} {label:<22} {text}"
+        line = f" {mark} {label:<26} {text}"
         stdscr.attron(attr)
         stdscr.addnstr(y, 0, line.ljust(width)[:width], width)
         stdscr.attroff(attr)
 
     shape, key = editor.rows[editor.index]
     if shape == "preset":
-        note = "opening, aspect, collage, render height and window, moved as one set"
+        note = "sets opening, shape, fill, detail and window together"
     else:
-        note = HELP.get(key, "")
+        # The TOML key leads the help line: it is what config.toml and the
+        # README call this, and the row above no longer says it.
+        note = f"{key} - {HELP.get(key, '')}"
         if key in DEFAULTS and key not in editor.explicit and key not in editor.changes:
-            note = f"(default) {note}"
+            note = f"{note}  (at its default)"
     stdscr.addnstr(height - 3, 1, note[:width - 2], width - 2)
     if editor.message:
         stdscr.attron(palette["changed"])
         stdscr.addnstr(height - 2, 1, editor.message[:width - 2], width - 2)
         stdscr.attroff(palette["changed"])
-    keys = " up/down move   left/right or space change   enter type   d default   p preview   s save   q quit"
+    keys = (" up/down move   pgdn/pgup page   space change   enter type"
+            "   d default   p preview   s save   q quit")
     stdscr.attron(palette["header"])
     stdscr.addnstr(height - 1, 0, keys.ljust(last)[:last], last)
     stdscr.attroff(palette["header"])
@@ -761,7 +857,7 @@ def run_screen(stdscr, editor):
             elif not editor.cycle(key, step):
                 if ch in (curses.KEY_RIGHT, curses.KEY_LEFT):
                     continue
-                raw = _prompt(stdscr, key, edit_text(editor.values.get(key)))
+                raw = _prompt(stdscr, label_of(key), edit_text(editor.values.get(key), key))
                 if raw is None:
                     continue
                 try:
@@ -803,7 +899,7 @@ def tui(path):
             write_config(path, changes, mode=mode if mode != mode_of(editor.original) else None)
             print(f"Wrote {len(changes)} change(s) to {path}:")
             for key in sorted(changes):
-                print(f"  {key} = {show_value(changes[key], key)}")
+                print(f"  {key} = {written_value(key, changes[key])}")
             print("Refreshing the panel (a Zero 2 W takes 1-2 min)...")
             return run_refresh(path)
         return 0
@@ -812,14 +908,17 @@ def tui(path):
 # --- command line ------------------------------------------------------------
 def list_settings(path):
     values, explicit = read_config(path)
+    name = preset_name(values)
+    print(f"\nmatboard: {name or 'custom'}    mode: {mode_of(values)}")
     for title, keys in sections():
         print(f"\n{title}")
         for key in keys:
             mark = " " if key in explicit else "."
-            print(f" {mark} {key:<22} {show_value(values.get(key), key)}")
-    name = preset_name(values)
-    print(f"\nlayout preset: {name or 'custom'}    mode: {mode_of(values)}")
-    print("(a . marks a key the config file does not set, so it is at its default)")
+            # Both names: the human one to find it by, the key to edit or
+            # script with.
+            print(f" {mark} {label_of(key):<26} {show_value(values.get(key), key):<28}"
+                  f" {key}")
+    print("\n(a . marks a key the config file does not set, so it is at its default)")
 
 
 def main(argv=None):
@@ -907,7 +1006,7 @@ def main(argv=None):
         mode = mode_of(merged)
         write_config(path, changes, mode=mode if mode != mode_of(values) else None)
         for key in sorted(changes):
-            print(f"{key} = {show_value(changes[key], key)}")
+            print(f"{key} = {written_value(key, changes[key])}")
         return 0 if args.no_refresh else run_refresh(path)
 
     if args.preview:

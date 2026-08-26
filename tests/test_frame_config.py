@@ -230,13 +230,13 @@ def test_the_bounds_are_the_ones_display_py_enforces():
 
 # --- the layout preset ------------------------------------------------------
 def test_the_preset_names_the_shipped_default():
-    assert tui.preset_name(display.DEFAULTS) == "A5 mat (an unmodified kit)"
+    assert tui.preset_name(display.DEFAULTS) == tui.PRESETS[0][0]
 
 
 def test_the_bare_panel_preset_round_trips():
     values = dict(display.DEFAULTS)
     values.update(dict(tui.PRESETS[1][1]))
-    assert tui.preset_name(values) == "bare panel (matboard taken out)"
+    assert tui.preset_name(values) == tui.PRESETS[1][0]
 
 
 def test_the_bare_panel_preset_actually_opens_the_frame_up():
@@ -361,7 +361,7 @@ def test_the_preset_row_moves_all_five_keys(monkeypatch, editor):
     layout that is coherent at the end of it."""
     keys = fake_curses([])
     drive(monkeypatch, editor, [keys.KEY_RIGHT, ord("q"), ord("y")], at=row_of(editor, "layout"))
-    assert tui.preset_name(editor.values) == "bare panel (matboard taken out)"
+    assert tui.preset_name(editor.values) == tui.PRESETS[1][0]
     assert set(editor.changes) == {"opening", "opening_aspect", "collage_frac",
                                    "shoot_collage_vh", "hours"}
 
@@ -587,3 +587,94 @@ def test_birdframe_names_no_longer_rewrites_toml_itself():
     text = (FRAME / "birdframe-names").read_text(encoding="utf-8")
     assert "awk" not in text
     assert "--get bird_names" in text and "--set" in text
+
+
+# --- said in the terms someone would say it in -------------------------------
+def test_every_setting_has_a_human_label():
+    """`bird_names` is not what someone scanning for the bird names is reading
+    for. The key still leads the help line, where it is useful for editing the
+    file or scripting; it is just not what the row is called."""
+    for _, keys in tui.sections():
+        for key in keys:
+            assert key in tui.LABELS, f"{key} has no human label"
+            assert tui.label_of(key) != key
+
+
+def test_the_matboard_choice_says_mat_and_no_mat():
+    names = " ".join(name for name, _ in tui.PRESETS).lower()
+    assert "with mat" in names and "no mat" in names
+
+
+@pytest.mark.parametrize("key, value, expected", [
+    ("collage_frac", 0.92, "92% of the opening"),
+    ("opening", 0.97, "97% of the panel height"),
+    ("shoot_collage_vh", 74, "74% of the render"),   # already 0-100, not scaled
+    ("opening_aspect", 0.75, "0.75 wide to 1 tall"),  # a ratio, not a percentage
+    ("saturation", 0.6, "60%"),
+    ("hours", 48, "48 h"),
+    ("timeout", 180, "180 s"),
+    ("rotate", 270, "270 degrees"),
+    ("fresh_minutes", 0, "off"),        # the zeroes that mean a word
+    ("mat", 0, "none"),
+    ("label_scale", 0, "as the mat gives it"),
+    ("bird_names", True, "on"),
+])
+def test_values_read_as_english(key, value, expected):
+    assert tui.show_value(value, key) == expected
+
+
+def test_a_summary_still_reads_as_a_config_line():
+    """"birds fill 92% of the opening" is right on the screen and wrong in the
+    list of what was just written to the file."""
+    assert tui.written_value("collage_frac", 0.98) == "0.98"
+    assert tui.written_value("bird_names", True) == "true"
+    assert tui.written_value("shoot_title", None) == "unset"
+    assert tui.written_value("basic_pass", "hunter2") == "set"
+
+
+def test_the_matboard_row_is_the_first_thing_on_the_screen(editor):
+    """It was buried in the panel section, which put it off the bottom of an
+    80x24 ssh window with nothing on screen saying so - indistinguishable from
+    it not existing."""
+    first_field = next(i for i, (shape, _) in enumerate(editor.rows) if shape != "header")
+    assert editor.rows[first_field] == ("preset", "layout")
+    assert editor.index == first_field
+
+
+def test_a_short_terminal_says_how_many_settings_there_are(monkeypatch, editor):
+    """The screen scrolls. Without the count, a window that shows twenty rows
+    looks exactly like a frame that only has twenty settings."""
+    module = fake_curses([ord("q")])
+    screen = module._screen
+    written = []
+    screen.addnstr = lambda y, x, text, n: written.append((y, text))
+    monkeypatch.setitem(sys.modules, "curses", module)
+    tui.run_screen(screen, editor)
+    total = sum(len(keys) for _, keys in tui.sections()) + 1   # + the matboard row
+    assert any(f"1/{total}" in text for _, text in written)
+
+
+@pytest.mark.parametrize("key, typed, expected", [
+    ("collage_frac", "98", 0.98),      # a percentage, as the row reads it out
+    ("collage_frac", "0.98", 0.98),    # or the fraction the file holds
+    ("opening", "97", 0.97),
+    ("saturation", "60", 0.6),
+    ("shoot_collage_vh", "74", 74),    # already a percentage - not scaled again
+    ("hours", "48", 48),               # not a percentage at all
+])
+def test_a_percentage_can_be_typed_back_in(key, typed, expected):
+    """The row says "92% of the opening". Handing that person a prompt that
+    only takes 0.92 is asking them to do arithmetic to change what they were
+    just shown. Everything shown as a percentage is capped at 1.0, so a value
+    over 1 is unambiguous."""
+    assert tui.parse_value(key, typed) == expected
+
+
+@pytest.mark.parametrize("key, value", [
+    ("collage_frac", 0.92), ("opening", 0.7071), ("saturation", 0.6),
+    ("shoot_collage_vh", 52), ("hours", 24), ("rotate", 90),
+])
+def test_what_is_shown_is_what_comes_back_to_edit(key, value):
+    """Round trip: the number offered in the prompt parses back to the value
+    the row was showing."""
+    assert tui.parse_value(key, tui.edit_text(value, key)) == value
