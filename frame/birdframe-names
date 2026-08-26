@@ -19,9 +19,12 @@ esac
 config=${BIRDFRAME_CONFIG:-$HOME/.birdframe/config.toml}
 [ -f "$config" ] || { echo "bird frame is not installed: $config is missing" >&2; exit 1; }
 
+# The trailing-comment strip matters: config.example.toml and install.sh both
+# annotate this line, and without it the value reads as "true# names written..."
+# and matches neither on nor off.
 current=$(awk -F= '
   /^[[:space:]]*bird_names[[:space:]]*=/ {
-    value=$2; gsub(/[[:space:]]/, "", value); print value; exit
+    value=$2; sub(/#.*/, "", value); gsub(/[[:space:]]/, "", value); print value; exit
   }
 ' "$config")
 current=${current:-false}

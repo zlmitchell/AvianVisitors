@@ -22,30 +22,88 @@ shoot = true
 # bw_country = "us"    # geocoder country for the ZIP
 # shoot = true         # this Pi renders the collage
 
-hours = 24             # window shown on the frame
+# The window shown on the frame. 48 rather than 24 because the second day is
+# what the fade below is drawn over: birds heard in the last 24h are at full
+# strength, and the rest of the window is the ramp they fade out along. Set it
+# to 24 and nothing fades - there is no tail left to fade over.
+hours = 48
 
 # --- Titles and look (used when this Pi renders, i.e. shoot = true) ----------
 shoot_title = "Avian Visitors"
 shoot_subtitle = "Heard Today"
-bird_names = false       # run `birdframe-names on` to show them
+# Every bird wears its name, written along its own outline. `birdframe-names
+# off` turns them off; keep the value on a line of its own, since that command
+# rewrites the whole line.
+bird_names = true
 # shoot_headline_px = 42
 # shoot_eyebrow_px = 18
 # shoot_lowercase = false
 # shoot_mat = 0.04
 # shoot_small_floor = 0.04
 # shoot_count_exp = 0.65   # tile size vs call count; higher = the loudest birds dominate more
+# shoot_collage_vh = 74    # share of the render viewport the collage gets. This is
+                           # how many source pixels the birds and their names are drawn
+                           # with before being resampled onto the panel: 74 suits a
+                           # full-panel opening, ~52 an A5 mat. Much past 76 and the
+                           # title runs out of viewport.
+
+# --- Currently singing ------------------------------------------------------
+# A bird heard this recently is outlined on the panel, traced round its own
+# silhouette in the Spectra red. The outline drops off once the bird has been
+# quiet for the window. 0 turns the mark off entirely.
+#
+# There is no partial refresh on this panel - the Inky library always sends both
+# half-panel buffers and a full display refresh - so this is deliberately NOT a
+# clock. Nothing counts down, and the panel redraws only when a bird actually
+# crosses in or out of the window.
+fresh_minutes = 30
+
+# --- Going quiet ------------------------------------------------------------
+# Hours of silence before a bird starts losing its colour. It drains in five
+# steps from here to `hours`, where the window drops it, so the default ramp is
+# 24h -> 48h. 0 turns fading off and every bird in the window stays at full
+# strength.
+#
+# Steps, not a gradient, for the same reason the singing mark is an outline and
+# not a clock: no partial refresh, so anything continuous would redraw the whole
+# panel to move one bird a shade paler. A step is the least that is worth
+# twelve seconds. Spectra 6 has no grey, so the panel renders a faded bird as
+# sparse black stipple on cream rather than as smooth grey.
+fade_hours = 24
 
 # --- Panel ------------------------------------------------------------------
 rotate = 90            # 90 or 270 if the frame hangs the other way up
 saturation = 0.6       # Inky colour saturation, 0 to 1
-mat = 0.0              # extra shrink of the content inside the A5 opening (0 = none)
-opening = 0.7071       # opening height as a panel fraction; raise toward 0.98 for a bare panel
+mat = 0.0              # extra shrink of the content inside the opening (0 = none)
+
+# The opening is the rectangle the content is fitted into. `opening` is its
+# height as a fraction of the panel; `opening_aspect` is its width over its
+# height. The defaults below are the bare 13.3" panel itself - take the
+# matboard out of the frame and the collage runs to the glass.
+opening = 0.97
+opening_aspect = 0.75  # the panel's own 1200x1600
+
+# Keeping the A4 frame's A5 mat instead? Both numbers change:
+# opening = 0.7071
+# opening_aspect = 0.7071
+# title_frac = 0.065
+# collage_frac = 0.66
+# gap_frac = 0.1
+
+# How the title and collage divide the opening: title_frac and gap_frac are of
+# its height, collage_frac of its width. Raising `opening` without raising
+# these only spreads the same small content further apart, which is why they
+# are here and not baked in.
+title_frac = 0.10
+collage_frac = 0.98
+gap_frac = 0.05
 # panel = "el133uf1"   # force the 13.3" driver if auto-detect ever fails
 
 # --- Refresh cadence --------------------------------------------------------
-# The panel refreshes only when the species set or a count bracket changes,
-# plus a daily heal. Quiet hours are off so nocturnal detections still show;
-# set quiet_start/quiet_end to a window to mute overnight.
+# The panel refreshes only when the species set, a count bracket, or the set of
+# currently-singing birds changes, plus a daily heal. Quiet hours are off so
+# nocturnal detections still show; set quiet_start/quiet_end to a window to
+# mute overnight.
 quiet_start = 0        # 0/0 = always refresh on change; e.g. 22 and 6 mutes 22:00-06:00
 quiet_end = 0
 heal_hours = 24        # force a refresh at least this often

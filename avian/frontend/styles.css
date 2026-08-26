@@ -8,6 +8,10 @@
     --ink-soft: #908576;
     --accent:   #4a3f31;   /* warm dark grey - matches ink-2, no longer red */
     --accent-2: #1a1612;   /* near-black ink - same hue as the title text */
+    /* Outline on a bird heard in the last half hour. Deliberately the
+       Spectra 6 red, so the e-ink frame draws this mark in one of the
+       panel's own inks and never has to dither it into a mottle. */
+    --fresh-ink: #a53c38;
     --hairline: rgba(26,22,18,0.14);  /* faint divider lines + chart gridlines */
     --pill:     #fcfcfb;              /* active-toggle sliding pill */
     /* Depth shadow recipes - replace flat 1px borders */
@@ -33,6 +37,7 @@
     --ink-soft: #837c70;   /* muted text */
     --accent:   #d8d2c6;   /* light warm - pills read light-on-dark */
     --accent-2: #ece8e1;
+    --fresh-ink: #d9776d;  /* the fresh outline, lifted to carry on charcoal */
     --hairline: rgba(236,232,225,0.20);  /* faint light divider on charcoal */
     --pill:     #3a3e48;                 /* raised, clearly lighter than the track */
     --edge:    inset 0 0 0 1px rgba(255,255,255,0.05), 0 0 0 1px rgba(0,0,0,0.4);
@@ -3365,6 +3370,49 @@ body.av-local #dd-items  { display: block; }
   font-weight: 400 700;
   font-display: swap;
 }
+/* Going quiet: five steps of colour draining out of a bird that has not been
+   heard for a while (see the fade run in apt.js, which sets data-fade). The
+   filter sits on the tile rather than on its image so the bird's name drains
+   with it - a crisp name over a ghost bird reads as a rendering fault, not as
+   a bird that has gone quiet.
+
+   Grey runs ahead of weight. Colour is the first thing a bird loses, because
+   losing it says "a while ago" without yet saying "nearly gone"; opacity only
+   really opens up over the last two steps, which is where the plate should
+   start to look like it is letting go. The last step stops at 0.42 rather than
+   fading to nothing: a bird still inside the window is still a bird that was
+   heard, and the e-ink dither needs something left to stipple.
+
+   Steps rather than a ramp because the panel has no partial refresh - see the
+   comment in apt.js. Transitions are off: on the website these only ever change
+   between renders, and on the frame there is nothing to animate. */
+.gtile[data-fade] { transition: none; }
+.gtile[data-fade="1"] { filter: grayscale(0.35); opacity: 0.90; }
+.gtile[data-fade="2"] { filter: grayscale(0.60); opacity: 0.78; }
+.gtile[data-fade="3"] { filter: grayscale(0.80); opacity: 0.66; }
+.gtile[data-fade="4"] { filter: grayscale(0.92); opacity: 0.54; }
+.gtile[data-fade="5"] { filter: grayscale(1);    opacity: 0.42; }
+/* Hovering a quiet bird brings it back, so the pill and the cutout can be read
+   at full strength without waiting for the bird to sing again. */
+.gtile[data-fade].is-hover { filter: none; opacity: 1; }
+
+/* A bird heard inside the fresh window wears its own outline (see the
+   fresh-detection run in apt.js). The path is the traced silhouette in tile
+   pixels, so the svg is exactly the tile's box at a 1:1 viewBox; overflow
+   stays visible because the outer half of the stroke lies past the traced
+   edge and would otherwise be clipped off at the tile. */
+.gtile-fresh {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  overflow: visible; pointer-events: none;
+}
+.gtile-fresh path {
+  fill: none;
+  stroke: var(--fresh-ink);
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
 /* Optional name for each bird, set either on a curve fitted to its
    silhouette or level in a clearing the bird leaves (see the label run in
    apt.js). The svg sits over the tile but draws past it, since a name

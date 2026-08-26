@@ -121,7 +121,18 @@ base_url = "http://birdnet.local"
 shoot = true
 shoot_title = "Avian Visitors"
 shoot_subtitle = "Heard Today"
-bird_names = false
+# Names written along each bird. `birdframe-names off` drops them.
+bird_names = true
+fresh_minutes = 30   # outline a bird heard this recently; 0 turns the mark off
+hours = 48           # 24h at full strength, then a fade out to the window edge
+fade_hours = 24      # silence before a bird starts losing colour; 0 = no fading
+# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?
+# Uncomment all five:
+# opening = 0.7071
+# opening_aspect = 0.7071
+# title_frac = 0.065
+# collage_frac = 0.66
+# gap_frac = 0.1
 rotate = 90          # flip to 270 if the frame hangs the other way up
 saturation = 0.6
 timeout = 180        # a Zero 2 W needs ~70-120s to shoot the collage
@@ -140,6 +151,13 @@ elif [ "$MODE" = image ]; then
     printf '%s\n' 'shoot = false'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
+    printf '%s\n' "# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?"
+    printf '%s\n' "# Uncomment all five:"
+    printf '%s\n' "# opening = 0.7071"
+    printf '%s\n' "# opening_aspect = 0.7071"
+    printf '%s\n' "# title_frac = 0.065"
+    printf '%s\n' "# collage_frac = 0.66"
+    printf '%s\n' "# gap_frac = 0.1"
   } > "$CONFIG"
 else
   # birdweather: this Pi renders from BirdWeather near $ZIP, gated on the same
@@ -154,9 +172,17 @@ else
     printf '%s\n' 'shoot = true         # this Pi renders the collage'
     printf '%s\n' 'shoot_title = "Avian Visitors"'
     printf '%s\n' 'shoot_subtitle = "Heard Today"'
-    printf '%s\n' 'bird_names = false'
+    printf '%s\n' '# Names along each bird. `birdframe-names off` drops them.'
+    printf '%s\n' 'bird_names = true'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'
+    printf '%s\n' "# Content runs to the edge of the bare panel. Keeping the frame's A5 mat?"
+    printf '%s\n' "# Uncomment all five:"
+    printf '%s\n' "# opening = 0.7071"
+    printf '%s\n' "# opening_aspect = 0.7071"
+    printf '%s\n' "# title_frac = 0.065"
+    printf '%s\n' "# collage_frac = 0.66"
+    printf '%s\n' "# gap_frac = 0.1"
   } > "$CONFIG"
 fi
 

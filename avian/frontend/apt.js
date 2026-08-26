@@ -523,10 +523,65 @@
   // the bird-to-bird gap the collage was tuned on while stopping a label from
   // reserving a bird-sized moat of empty paper around itself.
   var COLLAGE_LABEL_PAD = 1;
-  var FLY_PROB = 0.15; // chance a bird shows in its flight pose (rare); perched
-  // otherwise. Rolled once per window appearance.
-  var collagePose = {}; // sci -> 1 perched | 2 flight, persisted across polls;
-  // cleared when a bird leaves the window so it rerolls.
+  var FLY_PROB = 0.15; // share of species drawn in their flight pose (rare);
+  // perched otherwise. Decided by slugRand below, not by a coin: a species is
+  // always drawn in the same pose. This used to be Math.random() cached in a
+  // sci -> pose object, which held for the life of a page but not past it. The
+  // e-ink frame launches a fresh browser for every render, so one bird in
+  // seven changed silhouette between renders, and a changed silhouette
+  // repacks the whole plate - the birds visibly jumped every refresh. Nothing
+  // to store now, and the website gets the same bird in the same pose on every
+  // visit rather than a fresh roll per reload.
+
+  // A species' own number in [0, 1): FNV-1a over its slug, folded to a
+  // fraction. Stands in for Math.random() wherever a choice should be arbitrary
+  // but fixed - the same bird has to come out the same way on a machine that
+  // has never rendered it before, because the frame's browser is new every
+  // time and cannot be told what it chose last.
+  function slugRand(slug) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < slug.length; i++) {
+      h ^= slug.charCodeAt(i);
+      h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+    }
+    return h / 4294967296;
+  }
+
+  // Call counts are snapped to these brackets before they decide a tile's size.
+  //
+  // The plate's areas are shares of one budget, so a tile's size depends on
+  // every other bird's count as well as its own: one new detection anywhere
+  // resized everything, and a resized tile repacks the plate. On the website
+  // that was a reshuffle on each poll; on the frame, where a refresh is twelve
+  // seconds of full-panel redraw, it meant every bird jumped every time.
+  //
+  // These are exactly the brackets display.py's change signature already uses
+  // to decide whether a refresh is worth it. Sharing them makes the two agree:
+  // a count change too small to earn a refresh is now also too small to move
+  // anything, so a refresh driven by something else - a bird starting to sing,
+  // a bird fading - redraws the same plate with only that mark changed.
+  // Sizes now come in eight steps rather than a continuum, which reads as a
+  // clearer hierarchy, and the exponent below still shapes the ramp between them.
+  var COUNT_BRACKETS = [1, 2, 5, 15, 40, 100, 300, 1000];
+  // A bracket stands in for its members at its GEOMETRIC MIDPOINT, not at
+  // either edge. The edges look like the obvious choice and are not: a bird
+  // sitting just inside the bottom of a bracket would be lifted almost the
+  // whole width of it - a 420-call bird promoted to 1000 - while one at the top
+  // is not lifted at all. Since every area is a share of one budget, that
+  // lift comes straight out of the rest of the plate, so an arbitrary fact
+  // about where a count happens to fall shrinks every other bird. Measured
+  // over a plausible day's counts the upper edge inflates by 1.54x on average
+  // and anywhere from 1.0x to 2.5x bird by bird; the midpoint is 0.93x on
+  // average over a 0.61-1.44x spread, which is a distortion centred on nothing
+  // rather than one that always favours whoever is nearest a boundary.
+  function bracketCount(n) {
+    var lo = 1;
+    for (var i = 0; i < COUNT_BRACKETS.length; i++) {
+      if (n <= COUNT_BRACKETS[i]) return Math.sqrt(lo * COUNT_BRACKETS[i]);
+      lo = COUNT_BRACKETS[i];
+    }
+    return Math.sqrt(1000 * 3000);  // the top bracket is open-ended; keep the ~3x step
+  }
 
   // Decode and cache each mask once. Sparse cell-list form (only "on"
   // cells) makes collision tests linear in opaque area, not total area.
@@ -873,6 +928,127 @@
     // above pulls it a fraction inside the ink it came from.
     edgeFitCache[slug] = { pts: sm, w: w, h: h, at: at, cells: mask.cells };
     return edgeFitCache[slug];
+  }
+
+  // ---- Fresh-detection outline ----
+  // A bird heard inside the last FRESH_MIN minutes wears a stroke traced round
+  // its own silhouette, so the collage says which birds are singing right now
+  // without printing a clock anywhere. The stroke rides outline()'s polygon -
+  // the same boundary walk the names ride - so it follows the drawing's real
+  // edge rather than a box round it, and it costs no geometry the labels have
+  // not already paid for.
+  //
+  // "Now" is the recent API's own `anchor`: the station's local clock at the
+  // moment it answered. last_seen is in that same clock, so the two subtract
+  // cleanly, and a frame Pi whose clock has drifted from the mic's still
+  // outlines the right birds. Only if the payload carries no anchor does this
+  // fall back to the viewing device's clock.
+  //
+  // ?fresh=<minutes> overrides the window and ?fresh=0 turns the stroke off -
+  // the same door ?labels= uses, so the frame's shoot can set it without
+  // touching localStorage.
+  var FRESH_MIN = 30;
+  var freshParam = /[?&]fresh=(\d+)\b/.exec(location.search);
+  // Stroke weight as a share of the tile's geometric mean, floored so a
+  // one-call bird's small tile still carries a line the e-ink dither can hold
+  // (below about two device pixels Floyd-Steinberg breaks it into dashes).
+  var FRESH_STROKE = 0.022, FRESH_STROKE_MIN = 2;
+
+  function freshWindowMs() {
+    var mins = freshParam ? +freshParam[1] : FRESH_MIN;
+    return mins > 0 ? mins * 60000 : 0;
+  }
+
+  // The station's own clock at the moment it answered, in ms. Every age on the
+  // plate - how recently a bird sang, how long since it last did - is measured
+  // from this one reading, so the outline and the fade can never disagree
+  // about what time it is.
+  function payloadNow(payload) {
+    var t = payload && payload.anchor
+      ? Date.parse(String(payload.anchor).replace(' ', 'T')) : NaN;
+    return isNaN(t) ? Date.now() : t;
+  }
+
+  function lastSeenMs(s) {
+    if (!s || !s.last_seen) return NaN;
+    return Date.parse(String(s.last_seen).replace(' ', 'T'));
+  }
+
+  // The instant a detection has to be newer than to count as still singing,
+  // or NaN when the stroke is off. Read once per render, not per tile.
+  function freshCutoff(payload) {
+    var span = freshWindowMs();
+    return span ? payloadNow(payload) - span : NaN;
+  }
+
+  function isFresh(s, cutoff) {
+    if (isNaN(cutoff)) return false;
+    var t = lastSeenMs(s);
+    return !isNaN(t) && t >= cutoff;
+  }
+
+  // ---- Going quiet ----
+  // A bird that has not been heard for a while loses its colour and then most
+  // of its weight, in whole steps, until the window drops it entirely. What the
+  // plate is saying is that the collage is a day's listening and not a list:
+  // the birds that have gone quiet are still there, going.
+  //
+  // In steps, not continuously, and for the same reason the outline is a mark
+  // and not a clock: the panel has no partial refresh, so anything that changes
+  // by degrees would redraw the whole plate to move a bird one percent paler.
+  // A step is the smallest change worth twelve seconds. display.py folds the
+  // step into its change signature, so the panel redraws when a bird visibly
+  // dims and not otherwise.
+  //
+  // On the website this is a smooth grey. On Spectra 6 there is no grey - six
+  // inks and nothing between them - so the dither renders a faded bird as
+  // sparse black on cream, which reads as fading from across a room and as
+  // stipple up close.
+  //
+  // ?fade=<start>-<end> in hours overrides the window; ?fade=0 turns it off.
+  var FADE_STEPS = 5;
+  var FADE_START_H = 24, FADE_END_H = 48;
+  var fadeParam = /[?&]fade=(\d+)(?:-(\d+))?\b/.exec(location.search);
+
+  // [start, end] in hours, or null for no fading at all.
+  function fadeWindow() {
+    if (!fadeParam) return [FADE_START_H, FADE_END_H];
+    var from = +fadeParam[1];
+    var to = fadeParam[2] === undefined ? NaN : +fadeParam[2];
+    // ?fade=0, a missing end, or an end that is not after the start all mean
+    // there is no ramp to draw, so nothing fades.
+    return (from > 0 && to > from) ? [from, to] : null;
+  }
+
+  // Which step of the ramp a bird is on: 0 is full colour, FADE_STEPS is as
+  // faint as the plate goes. A bird with no last_seen (BirdWeather) never fades.
+  function fadeStep(s, nowMs, win) {
+    if (!win) return 0;
+    var t = lastSeenMs(s);
+    if (isNaN(t)) return 0;
+    var hours = (nowMs - t) / 3600000;
+    if (hours <= win[0]) return 0;
+    var through = (hours - win[0]) / (win[1] - win[0]);
+    if (through > 1) through = 1;
+    return Math.min(FADE_STEPS, Math.ceil(through * FADE_STEPS));
+  }
+
+  // The silhouette's own boundary as one closed path in tile pixels. Returns
+  // '' for a shape outline() could not trace (too few boundary cells), which
+  // leaves that bird unstroked rather than boxed - a rectangle round a bird
+  // would read as a different statement than the outline does.
+  function freshPath(t) {
+    var out = outline(t.slug, t.mask);
+    if (!out || !out.pts || out.pts.length < 2) return '';
+    var sx = t.fullW / out.w, sy = t.fullH / out.h, d = [], i;
+    for (i = 0; i < out.pts.length; i++) {
+      d.push((i ? 'L' : 'M') + (out.pts[i][0] * sx).toFixed(1) + ' ' + (out.pts[i][1] * sy).toFixed(1));
+    }
+    return d.join(' ') + ' Z';
+  }
+
+  function freshStrokeWidth(t) {
+    return Math.max(FRESH_STROKE_MIN, Math.sqrt(t.fullW * t.fullH) * FRESH_STROKE);
   }
 
   // What makes an edge worth writing along, as one number in 0..1. Three
@@ -2125,28 +2301,21 @@
       var hasFlight = !!DIMS[base + '-2'];
       // Pose: perched by default, rarely flight (FLY_PROB), and only if a
       // flight render exists. Flight uses the <slug>-2 mask/aspect/image so
-      // the wings-spread silhouette nests correctly.
-      var pose = collagePose[s.sci];
-      if (pose === undefined) {
-        pose = (hasFlight && Math.random() < FLY_PROB) ? 2 : 1;
-        collagePose[s.sci] = pose;
-      }
-      if (pose === 2 && !hasFlight) { pose = 1; collagePose[s.sci] = 1; }
+      // the wings-spread silhouette nests correctly. Taken from the slug so it
+      // is the same on every render everywhere - see slugRand.
+      var pose = (hasFlight && slugRand(base) < FLY_PROB) ? 2 : 1;
       var slug = pose === 2 ? base + '-2' : base;
       var mask = loadMask(slug);
-      if (!mask && pose === 2) { pose = 1; slug = base; mask = loadMask(slug); collagePose[s.sci] = 1; }
+      if (!mask && pose === 2) { pose = 1; slug = base; mask = loadMask(slug); }
       if (!mask) return null;
       var d = DIMS[slug];
       var n = +s.n; if (!n || isNaN(n)) n = 1;
       return {
         mask: mask, data: s, pose: pose, slug: slug,
         ar: d ? d[0] / d[1] : 1.4,
-        score: Math.pow(Math.max(1, n), T.countExp),
+        score: Math.pow(bracketCount(Math.max(1, n)), T.countExp),
       };
     }).filter(Boolean);
-    // Reroll on re-entry: forget pose choices for species no longer in window.
-    var present = {}; items.forEach(function (s) { present[s.sci] = 1; });
-    Object.keys(collagePose).forEach(function (k) { if (!present[k]) delete collagePose[k]; });
 
     // Step 2: normalise so sum(area) ≈ budget. Then floor each tile
     // at minArea so even a 1-call bird stays legible.
@@ -2235,6 +2404,11 @@
       placed.forEach(function (t) { if (t.x > -1000) { t.x += dx; t.y += dy; } });
     }
 
+    // One clock reading for the whole collage: every bird is judged against the
+    // same instant, so two birds a second apart in the ledger can never land on
+    // opposite sides of a window in one render.
+    var freshCut = freshCutoff(DATA.recent);
+    var nowMs = payloadNow(DATA.recent), fadeWin = fadeWindow();
     placed.forEach(function (r) {
       var s = r.data;
       // com flows through so the worker's JIT Gemini job uses the right
@@ -2257,7 +2431,28 @@
       btn.style.top = r.y + 'px';
       btn.style.width = r.fullW + 'px';
       btn.style.height = r.fullH + 'px';
+      // Going quiet. An attribute rather than an inline filter so the five
+      // steps live in one place in the stylesheet and the frame can re-cut them
+      // for e-ink without this code knowing anything about ink.
+      var dim = fadeStep(s, nowMs, fadeWin);
+      if (dim) btn.setAttribute('data-fade', dim);
       btn.innerHTML = '<img loading="lazy" decoding="async" src="' + img + '" alt="' + s.com + '">';
+      // Still singing: draw the silhouette's own boundary over the bird's edge.
+      // Inserted before the name so the lettering stays the topmost ink on the
+      // tile - the stroke marks the bird, it does not compete with reading it.
+      if (isFresh(s, freshCut)) {
+        var fd = freshPath(r);
+        if (fd) {
+          // The stroke is the sighted reader's cue; the title carries the same
+          // fact for a screen reader and for the keyboard path, which is the
+          // only place the count and window already live.
+          btn.title += ' - singing now';
+          btn.insertAdjacentHTML('beforeend',
+            '<svg class="gtile-fresh" aria-hidden="true" viewBox="0 0 ' +
+            r.fullW.toFixed(1) + ' ' + r.fullH.toFixed(1) + '">' +
+            '<path d="' + fd + '" stroke-width="' + freshStrokeWidth(r).toFixed(2) + '"/></svg>');
+        }
+      }
       if (r.labelRows) {
         addLabelInk();
         // One baseline per line of the name, each riding the line the planner

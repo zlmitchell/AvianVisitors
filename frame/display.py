@@ -11,19 +11,19 @@ look can be checked on any machine without the panel.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import base64
 import hashlib
 import inspect
 import io
 import json
+import math
 import os
 import re
 import statistics
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PIL import Image, ImageChops, ImageDraw
 
@@ -45,16 +45,48 @@ DEFAULTS = {
     "zip": "",              # BirdWeather ZIP / postal code (with species_source = "birdweather")
     "bw_days": 7,           # BirdWeather lookback window, in days
     "bw_country": "us",     # geocoder country for the ZIP
-    "hours": 24,
+    # 48, not 24: the second day is what the fade ramp is drawn over. A bird
+    # heard in the last 24h is shown at full strength; past that it loses colour
+    # in steps until the window drops it. Narrow this to 24 and nothing fades,
+    # because there is no tail left to fade over.
+    "hours": 48,
     "image": "",            # local PNG written by the shooter
     "image_url": "",        # or a published screenshot URL
     "shoot": False,         # or capture inline (needs a browser; the 3 A+ and Zero 2 W both handle it)
     "shoot_title": None, "shoot_subtitle": None,
     "shoot_headline_px": 42, "shoot_eyebrow_px": 18, "shoot_lowercase": False,
     "shoot_mat": 0.04, "shoot_small_floor": 0.04, "shoot_count_exp": 0.65,
-    "bird_names": False,
-    "mat": 0.0,             # extra global shrink of the content inside the A5 opening
-    "opening": 0.7071,      # opening height as a panel fraction; 0.7071 preserves A5
+    # How much of the browser viewport the collage gets. The shot is a fixed
+    # 1200x1600 whatever this is, so it decides how many source pixels the birds
+    # (and the names written along them) are drawn with before the matting step
+    # resamples them onto the panel. 52 was sized for the A5 opening, which threw
+    # over half of them away; a full-panel opening wants the collage drawn close
+    # to panel size in the first place. The rest of the viewport has to hold the
+    # title and the stage padding, so this cannot go much past 76.
+    "shoot_collage_vh": 74,
+    "bird_names": True,
+    "fresh_minutes": 30,    # outline birds heard this recently; 0 turns the mark off
+    # Hours of silence before a bird starts losing its colour. It finishes at
+    # `hours`, where the window drops it, so the ramp is fade_hours -> hours.
+    # 0 turns fading off and every bird in the window stays at full strength.
+    "fade_hours": 24,
+    "mat": 0.0,             # extra global shrink of the content inside the opening
+    # The opening is the rectangle the content is fitted into. `opening` is its
+    # height as a fraction of the panel and `opening_aspect` is its width over
+    # its height. The defaults are the bare panel's own 1200x1600 at 97%, which
+    # is what a frame with the matboard taken out wants. An A4 frame still
+    # carrying its A5 mat is opening = 0.7071, opening_aspect = 0.7071.
+    "opening": 0.97,
+    "opening_aspect": 0.75,
+    # How the title and collage divide the opening. Fractions rather than
+    # pixels so one set of numbers covers the bare panel and any mat cut for
+    # it: title_frac and gap_frac are of the opening's height, collage_frac of
+    # its width. Raising the opening without raising these would only move the
+    # same small content further apart, which is why they are config and not
+    # constants.
+    "title_frac": 0.10,
+    "collage_frac": 0.98,
+    "gap_frac": 0.05,
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
@@ -87,26 +119,112 @@ def _bucket(n):
 
 
 def fetch_recent(base, hours, timeout, auth=None):
+    """The recent-window payload, whole. The species list is what gets drawn,
+    and `anchor` is the station's local clock at the moment it answered, which
+    is the only clock `last_seen` can be compared against."""
     url = f"{base.rstrip('/')}/avian/api/birdnet-api.php?action=recent&hours={hours}"
     req = urllib.request.Request(url, headers={"User-Agent": "AvianVisitors-frame/1.0"})
     if auth:
         req.add_header("Authorization", auth)
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read(2_000_000)).get("species", [])
+        payload = json.loads(r.read(2_000_000))
+    return payload.get("species", []) or [], payload.get("anchor")
 
 
-def signature(species):
-    items = sorted((slugify(s["sci"]), _bucket(int(s.get("n") or 1))) for s in species)
-    return hashlib.sha256(json.dumps(items).encode()).hexdigest()[:16]
+def parse_station_ts(value):
+    """A station timestamp ("YYYY-MM-DD HH:MM:SS", no zone) as a naive
+    datetime, or None. Naive on purpose: BirdNET-Pi writes Date and Time in
+    the station's local clock and `anchor` comes from the same clock, so both
+    sides of the comparison are in it and neither needs a zone."""
+    if not value:
+        return None
+    text = str(value).strip().replace("T", " ")
+    for width, fmt in ((19, "%Y-%m-%d %H:%M:%S"), (16, "%Y-%m-%d %H:%M")):
+        try:
+            return datetime.strptime(text[:width], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def fresh_slugs(species, anchor, minutes):
+    """The slugs the collage will outline: heard within `minutes` of the API's
+    own anchor. This mirrors apt.js's fresh window exactly - same anchor, same
+    last_seen, same arithmetic - so the signature changes on precisely the
+    renders that would draw a different set of outlines.
+
+    Falls back to this Pi's clock only when the payload carries no anchor
+    (BirdWeather mode, or an older BirdNET-Pi), and returns nothing at all when
+    the window is off or no species carries a last_seen."""
+    if not minutes or minutes <= 0:
+        return frozenset()
+    now = parse_station_ts(anchor) or datetime.now()
+    cutoff = now - timedelta(minutes=minutes)
+    out = set()
+    for s in species:
+        seen = parse_station_ts(s.get("last_seen"))
+        if seen is not None and seen >= cutoff:
+            out.add(slugify(s["sci"]))
+    return frozenset(out)
+
+
+FADE_STEPS = 5  # must match FADE_STEPS in apt.js and the .gtile[data-fade=N] rules
+
+
+def fade_steps(species, anchor, fade_hours, window_hours, steps=FADE_STEPS):
+    """slug -> how far into the fade the collage will draw it, 1..steps. Mirrors
+    apt.js's fadeStep exactly, on the same anchor and the same last_seen, so
+    what this counts is what the renderer will actually put on the panel.
+
+    Birds still at full strength are simply absent from the result, as are
+    species with no last_seen at all (BirdWeather), and the whole thing is empty
+    when there is no tail to fade over."""
+    if not fade_hours or fade_hours <= 0 or not window_hours or window_hours <= fade_hours:
+        return {}
+    now = parse_station_ts(anchor) or datetime.now()
+    out = {}
+    for s in species:
+        seen = parse_station_ts(s.get("last_seen"))
+        if seen is None:
+            continue
+        quiet = (now - seen).total_seconds() / 3600.0
+        if quiet <= fade_hours:
+            continue
+        through = min(1.0, (quiet - fade_hours) / (window_hours - fade_hours))
+        step = min(steps, math.ceil(through * steps))
+        if step > 0:
+            out[slugify(s["sci"])] = step
+    return out
+
+
+def signature(species, fresh=frozenset(), fade=None):
+    """What has to change before the panel is worth its twelve seconds: the
+    species on it, their count bracket, whether each is wearing the fresh
+    outline, and how faded each is.
+
+    Both time-based terms are in here rather than on clocks of their own
+    because the panel has no partial refresh. A bird crossing the fresh window
+    or stepping down the fade ramp is the only thing about the passage of time
+    that changes a pixel; a detection that moves neither is not worth a redraw.
+    The count is bracketed for the same reason, and the renderer sizes its tiles
+    off the same brackets, so a refresh driven by a mark redraws the identical
+    plate with only that mark changed - no bird moves."""
+    fade = fade or {}
+    items = []
+    for s in species:
+        slug = slugify(s["sci"])
+        items.append((slug, _bucket(int(s.get("n") or 1)), slug in fresh, fade.get(slug, 0)))
+    return hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest()[:16]
 
 
 def fetch_species(cfg, auth=None):
-    """The species list the signature is built from: the BirdNET-Pi recent API
-    by default, or BirdWeather's recent detections near a ZIP when
-    species_source = "birdweather"."""
+    """(species, anchor) for the signature and the render: the BirdNET-Pi
+    recent API by default, or BirdWeather's recent detections near a ZIP when
+    species_source = "birdweather". BirdWeather reports no per-species
+    last_seen, so it has no anchor and no bird is ever outlined there."""
     if cfg.get("species_source") == "birdweather":
         import birdweather
-        return birdweather.species_for_zip(cfg["zip"], country=cfg["bw_country"], days=cfg["bw_days"])
+        return birdweather.species_for_zip(cfg["zip"], country=cfg["bw_country"], days=cfg["bw_days"]), None
     return fetch_recent(cfg["base_url"], cfg["hours"], cfg["timeout"], auth)
 
 
@@ -134,23 +252,40 @@ def _paper(img):
     return tuple(int(statistics.median(c)) for c in zip(*px))
 
 
-# The opening is a 1:sqrt(2) rectangle centred in the panel. `opening` sets
-# how much of the panel height it covers; 0.7071 preserves the A5 default.
-def opening_size(opening):
-    if isinstance(opening, bool):
-        raise ValueError("opening must be greater than 0 and at most 1")
+def _frac(value, name, hi=1.0):
+    """A config fraction, validated. Rejects bool explicitly: True is a float
+    of 1.0 to Python and would silently mean "the whole panel"."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be greater than 0 and at most {hi:g}")
     try:
-        opening = float(opening)
+        value = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("opening must be greater than 0 and at most 1") from exc
-    if not 0 < opening <= 1:
-        raise ValueError("opening must be greater than 0 and at most 1")
+        raise ValueError(f"{name} must be greater than 0 and at most {hi:g}") from exc
+    if not 0 < value <= hi:
+        raise ValueError(f"{name} must be greater than 0 and at most {hi:g}")
+    return value
+
+
+# The opening is the rectangle the content is fitted into, centred in the
+# panel. `opening` is its height as a fraction of the panel and `aspect` is its
+# width over its height, so the two together describe a bare panel (0.97 and
+# the panel's own 0.75) and any mat cut for one (an A5 window is 0.7071 and
+# 0.7071) without the caller having to know which is which. A tall aspect can
+# ask for more width than the panel has, so the result is pulled back to fit
+# rather than letting content run off the glass.
+def opening_size(opening, aspect=0.75):
+    opening = _frac(opening, "opening")
+    aspect = _frac(aspect, "opening_aspect", hi=10.0)
     h = PANEL_H * opening
-    return h / 1.41421, h
+    w = h * aspect
+    if w > PANEL_W:
+        h *= PANEL_W / w
+        w = PANEL_W
+    return w, h
 
 
-def _place(content, paper, mat, opening):
-    box_w, box_h = opening_size(opening)
+def _place(content, paper, mat, opening, aspect=0.75):
+    box_w, box_h = opening_size(opening, aspect)
     s = min(box_w * (1 - mat) / content.width, box_h * (1 - mat) / content.height)
     nw, nh = max(1, round(content.width * s)), max(1, round(content.height * s))
     content = content.resize((nw, nh), Image.LANCZOS)
@@ -184,13 +319,33 @@ def _centroid_x(img, paper):
     return sum(x * v for x, v in enumerate(cols)) / total
 
 
-# Content layout inside the A5 opening: the title and collage are sized
-# independently (as fractions of the opening width), so tuning one leaves the
-# other untouched. gap is a fraction of the opening height.
-TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.065, 0.66, 0.1
+# Content layout inside the opening: the title and collage are sized
+# independently (title as a fraction of the opening height, collage of its
+# width), so tuning one leaves the other untouched. gap is a fraction of the
+# opening height. These are the shipped defaults; every one is a config key,
+# because a bare panel and an A5 mat want very different numbers and the whole
+# point of enlarging the opening is that the content grows with it.
+TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.10, 0.98, 0.05
 
 
-def mat_and_center(img, mat, opening):
+def layout_of(cfg):
+    """Everything mat_and_center needs, pulled out of config. Every fraction is
+    validated here rather than deep in the resize, so a typo in config.toml
+    fails loudly instead of quietly mis-sizing the panel."""
+    opening = _frac(cfg.get("opening", 0.97), "opening")
+    aspect = _frac(cfg.get("opening_aspect", 0.75), "opening_aspect", hi=10.0)
+    return {
+        "mat": cfg.get("mat", 0.0) or 0.0,
+        "opening": opening,
+        "aspect": aspect,
+        "title": _frac(cfg.get("title_frac", TITLE_H_FRAC), "title_frac"),
+        "collage": _frac(cfg.get("collage_frac", COLLAGE_FRAC), "collage_frac"),
+        "gap": _frac(cfg.get("gap_frac", GAP_FRAC), "gap_frac"),
+    }
+
+
+def mat_and_center(img, mat, opening, aspect=0.75,
+                   title_frac=TITLE_H_FRAC, collage_frac=COLLAGE_FRAC, gap_frac=GAP_FRAC):
     """Crop the title and collage, size each to a fraction of the opening,
     stack with a gap, and centre on the panel."""
     img = img.convert("RGB")
@@ -216,24 +371,24 @@ def mat_and_center(img, mat, opening):
             run = 0
     tb = _region_bbox(img, paper, top, split[0]) if split else None
     cb = _region_bbox(img, paper, split[1], bot + 1) if split else None
-    ow, oh = opening_size(opening)
+    ow, oh = opening_size(opening, aspect)
     box_w, box_h = ow * (1 - mat), oh * (1 - mat)
     if not (tb and cb):
-        return _place(img.crop(full), paper, mat, opening)
-    title = _scale_h(img.crop(tb), box_h * TITLE_H_FRAC)
-    gap = round(box_h * GAP_FRAC)
+        return _place(img.crop(full), paper, mat, opening, aspect)
+    title = _scale_h(img.crop(tb), box_h * title_frac)
+    gap = round(box_h * gap_frac)
     # Size the collage to fill the room left under the fixed-size title,
     # binding on whichever of width or remaining height runs out first, so the
     # title stays a consistent size whether the collage is tall or compact
     # instead of ballooning when the collage happens to be short.
     coll = img.crop(cb)
-    cs = min(box_w * COLLAGE_FRAC / coll.width, (box_h - title.height - gap) / coll.height)
+    cs = min(box_w * collage_frac / coll.width, (box_h - title.height - gap) / coll.height)
     collage = coll.resize((max(1, round(coll.width * cs)), max(1, round(coll.height * cs))), Image.LANCZOS)
     ccx = _centroid_x(collage, paper)  # centre the collage by ink weight, not bbox
     half = max(ccx, collage.width - ccx)
     # A wildly off-centre collage can push the centroid-mirrored width (2*half)
-    # past the A5 opening; shrink only the collage, never the fixed-size title,
-    # so nothing spills under the physical mat.
+    # past the opening; shrink only the collage, never the fixed-size title,
+    # so nothing spills under the physical mat (or off the glass on a bare panel).
     if 2 * half > box_w:
         s = box_w / (2 * half)
         collage = collage.resize((max(1, round(collage.width * s)), max(1, round(collage.height * s))), Image.LANCZOS)
@@ -256,9 +411,9 @@ def quantize_spectra6(img):
     return img.convert("RGB").quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG).convert("RGB")
 
 
-def _draw_mat_box(img, opening):
+def _draw_mat_box(img, opening, aspect=0.75):
     """Dev aid: outline the configured mat opening."""
-    ow, oh = opening_size(opening)
+    ow, oh = opening_size(opening, aspect)
     x0, y0 = round((PANEL_W - ow) / 2), round((PANEL_H - oh) / 2)
     ImageDraw.Draw(img).rectangle((x0, y0, PANEL_W - x0 - 1, PANEL_H - y0 - 1),
                                   outline=(170, 60, 56), width=2)
@@ -312,13 +467,32 @@ def in_quiet_hours(cfg, hour):
     return s <= hour < e if s < e else hour >= s or hour < e
 
 
-def frame_url(url, bird_names):
-    """Set the frame's label preference without disturbing other URL state."""
+def fade_param(cfg):
+    """The renderer's ?fade= value: "<start>-<end>" in hours, or "0" when there
+    is no tail to fade over (fading off, or the window no wider than the point
+    the fade would start at)."""
+    start = cfg.get("fade_hours") or 0
+    window = cfg.get("hours") or 0
+    return f"{int(start)}-{int(window)}" if 0 < start < window else "0"
+
+
+def frame_url(url, bird_names, fresh_minutes=None, fade=None):
+    """Set the frame's label, fresh-outline and fade preferences without
+    disturbing other URL state. A None leaves the source's own setting alone."""
     import urllib.parse
     parts = urllib.parse.urlsplit(url)
+    drop = {"labels"}
+    if fresh_minutes is not None:
+        drop.add("fresh")
+    if fade is not None:
+        drop.add("fade")
     query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-             if k != "labels"]
+             if k not in drop]
     query.append(("labels", "1" if bird_names else "0"))
+    if fresh_minutes is not None:
+        query.append(("fresh", str(max(0, int(fresh_minutes)))))
+    if fade is not None:
+        query.append(("fade", fade))
     return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
 
@@ -327,11 +501,12 @@ def obtain_image(cfg, species=None):
     if cfg.get("species_source") == "birdweather":
         from shoot import shoot_birdweather
         if species is None:  # gate skipped (--no-signature): fetch the list to render
-            species = fetch_species(cfg, _auth(cfg))
+            species, _ = fetch_species(cfg, _auth(cfg))
         out = os.path.join(os.path.expanduser(cfg["cache"]), "frame.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         shoot_birdweather(out, species, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
-                          timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"])
+                          timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"],
+                          collage_vh=cfg["shoot_collage_vh"])
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
         from shoot import shoot
@@ -342,17 +517,19 @@ def obtain_image(cfg, species=None):
               lowercase=cfg["shoot_lowercase"], mat=cfg["shoot_mat"],
               small_floor=cfg["shoot_small_floor"], count_exp=cfg["shoot_count_exp"], timeout_ms=cfg["timeout"] * 1000,
               user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
-              bird_names=cfg["bird_names"])
+              bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
+              fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"])
         return Image.open(out).convert("RGB")
     src = cfg["image_url"] or cfg["image"]
     if not src:
         raise ValueError("set image, image_url, or shoot in config")
-    # A pre-rendered frame is still someone's render, so ask it for names the
-    # same way this Pi asks its own browser. A source that does not know the
-    # parameter ignores it and sends what it always sent, so this is safe
-    # against anything. URLs only: a local file path has no query string.
+    # A pre-rendered frame is still someone's render, so ask it for names and
+    # the fresh window the same way this Pi asks its own browser. A source that
+    # does not know the parameters ignores them and sends what it always sent,
+    # so this is safe against anything. URLs only: a local file path has no
+    # query string.
     if cfg["image_url"]:
-        src = frame_url(src, cfg["bird_names"])
+        src = frame_url(src, cfg["bird_names"], cfg["fresh_minutes"], fade_param(cfg))
     return get_image(src, cfg["timeout"], _auth(cfg))
 
 
@@ -363,8 +540,10 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     species = None
     if use_signature:
         try:
-            species = fetch_species(cfg, _auth(cfg))
-            sig = signature(species)
+            species, anchor = fetch_species(cfg, _auth(cfg))
+            sig = signature(species,
+                            fresh_slugs(species, anchor, cfg["fresh_minutes"]),
+                            fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"]))
         except Exception as e:
             print(f"signature fetch failed: {e}", file=sys.stderr)  # treat as no change
     heal_due = now - state.get("last_refresh", 0) >= cfg["heal_hours"] * 3600
@@ -383,11 +562,13 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     except Exception as e:
         print(f"could not get image: {e}", file=sys.stderr)  # keep last panel image
         return
-    img = mat_and_center(img, cfg["mat"], cfg["opening"])
+    lay = layout_of(cfg)
+    img = mat_and_center(img, lay["mat"], lay["opening"], lay["aspect"],
+                         lay["title"], lay["collage"], lay["gap"])
     if preview:
         out = quantize_spectra6(img)
         if mat_box:
-            _draw_mat_box(out, cfg["opening"])
+            _draw_mat_box(out, lay["opening"], lay["aspect"])
         out.save(preview)
         print(f"wrote preview {preview}")
         return
@@ -433,14 +614,24 @@ def main():
     # half-panel controllers) that shows a split image and can wedge one
     # controller until a full power cycle. The lock lives in the cache dir
     # and is dropped automatically on exit.
+    #
+    # fcntl is imported here rather than at the top because it is Unix-only and
+    # this module is also meant to load on a laptop, where --preview is the
+    # whole point and there is no panel to serialize access to. Where it is
+    # missing there is nothing to protect, so the run simply goes unlocked.
     lock_path = os.path.join(os.path.expanduser(cfg["cache"]), ".render.lock")
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     lock = open(lock_path, "w")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("another render is in progress; skipping")
-        return
+        import fcntl
+    except ModuleNotFoundError:
+        fcntl = None
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("another render is in progress; skipping")
+            return
     run(cfg, preview=args.preview, force=args.force, use_signature=not args.no_signature, mat_box=args.mat_box)
 
 

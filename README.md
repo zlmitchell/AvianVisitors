@@ -133,9 +133,15 @@ Everything outside `avian/` and `frame/` is upstream BirdNET-Pi.
 
 ---
 
+## The collage
+
+Every bird carries its common name, written along a run of its own outline rather than captioned beneath it; a bird heard in the last half hour is outlined in red; and a bird that has gone quiet drains its colour over its second day until the window drops it. Names are a per-device toggle under **Settings**; the two time marks are always on, and the frame sets its own windows for them in config.
+
 ## Wall frame
 
-An optional e-ink frame mirrors the last 24h of birds onto a panel by your window. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
+An optional e-ink frame mirrors the collage onto a panel by your window: a day's birds at full strength with yesterday's fading out behind them. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
+
+The frame draws to the bare 13.3" panel by default rather than the A5 mat opening it used to. If you have an existing frame with the matboard still in, [`frame/README.md`](frame/README.md#layout-the-panel-or-a-mat-cut-for-it) has the five config lines that put it back.
 
 ---
 

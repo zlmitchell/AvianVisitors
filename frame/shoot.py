@@ -56,11 +56,20 @@ def _frame_css(headline_px, eyebrow_px, lowercase, pad_top, pad_side, pad_bottom
         f".views {{ flex: 0 0 auto !important; height: {collage_vh}vh !important; }}"
         f".view#v0 {{ height: 100% !important; flex: 1 1 100% !important; padding: 6px 0 !important; }}"
         f".gcollage {{ max-width: none !important; }}"
-        f".static-head {{ padding: 0 8px 14px !important; }}"
+        # 40px, not the site's own 14. display.py splits the title off the
+        # collage at the first 60-device-pixel band of clear paper between
+        # them, and at dsf=2 this padding is the only part of that band it can
+        # count on: with the collage now taking three quarters of the viewport,
+        # the packed cluster no longer leaves slack of its own to borrow.
+        f".static-head {{ padding: 0 8px 40px !important; }}"
         f".static-head .pre {{ font-size: {eyebrow_px}px !important; }}"
         f".static-head h1 {{ font-size: {headline_px}px !important; }}"
         ".gtile-label text { fill: #000 !important; filter: none !important;"
         " font-weight: 400 !important; }"
+        # The fresh outline is pinned to the Spectra 6 red rather than left to
+        # the page's own variable, so the panel lays the mark down in one of its
+        # six inks and the dither never has to mottle it into a broken line.
+        " .gtile-fresh path { stroke: #a53c38 !important; }"
         ".empty-nest .empty { font-size: 18px !important; font-weight: 650 !important;"
         " letter-spacing: 0.12em !important; color: #242424 !important; }"
     )
@@ -76,12 +85,16 @@ def _safe_continue(route):
         pass
 
 
-def _frame_url(url, bird_names):
-    """Set the frame's label preference without disturbing other URL state."""
+def _frame_url(url, bird_names, fresh_minutes=0, fade="0"):
+    """Set the frame's label, fresh-outline and fade preferences without
+    disturbing other URL state. fresh_minutes = 0 turns the outline off;
+    fade = "0" turns the fade off, otherwise it is "<start>-<end>" in hours."""
     parts = urllib.parse.urlsplit(url)
     query = [(key, value) for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-             if key != "labels"]
+             if key not in ("labels", "fresh", "fade")]
     query.append(("labels", "1" if bird_names else "0"))
+    query.append(("fresh", str(max(0, int(fresh_minutes or 0)))))
+    query.append(("fade", str(fade or "0")))
     return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
 
@@ -178,10 +191,11 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, auth, misses):
 
 def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           headline_px=42, eyebrow_px=18, lowercase=False,
-          mat=0.04, collage_vh=52, cluster_xbias=1.0, cluster_ybias=1.2,
+          mat=0.04, collage_vh=74, cluster_xbias=1.0, cluster_ybias=1.2,
           count_exp=0.4, cluster_pad=1, label_min_px=11, small_floor=0.04, window_hours=None,
           timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
-          cutout_local=None, empty_text="listening for birds…", bird_names=False):
+          cutout_local=None, empty_text="listening for birds…", bird_names=True,
+          fresh_minutes=30, fade="24-48"):
     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
 
@@ -217,7 +231,8 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                 "var s=document.createElement('style');s.textContent=" + json.dumps(css) +
                 ";document.head.appendChild(s);});")
 
-            resp = page.goto(_frame_url(url, bird_names), wait_until="domcontentloaded", timeout=timeout_ms)
+            resp = page.goto(_frame_url(url, bird_names, fresh_minutes, fade),
+                             wait_until="domcontentloaded", timeout=timeout_ms)
             if resp is None or not resp.ok:
                 raise RuntimeError(f"site returned {resp.status if resp else 'no response'}")
             if bird_names:
@@ -245,9 +260,16 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                         "() => [...document.querySelectorAll('.gtile')]"
                         ".filter(t => !t.querySelector('.gtile-label text'))"
                         ".map(t => t.getAttribute('data-sci') || '?')")
+                    # A warning, not a failure. This check was written when names
+                    # were off by default, so refusing to ship a half-named frame
+                    # cost nothing; now that every frame draws them, the same
+                    # refusal would leave the wall showing yesterday's picture
+                    # indefinitely over one bird the planner could not fit. The
+                    # journal still records exactly which bird, which is what the
+                    # check was for.
                     if missing_labels:
-                        raise RuntimeError(
-                            "frame labels missing for: " + ", ".join(missing_labels))
+                        print("frame labels missing for: " + ", ".join(missing_labels),
+                              file=sys.stderr)
             elif page.query_selector(".nest-img") is not None:
                 # Birdless empty state: wait for the nest illustration to load so
                 # the frame never captures a blank collage area.
@@ -299,7 +321,11 @@ def shoot_birdweather(out, species, *, title=None, subtitle=None, timeout_ms=450
     # BirdWeather's flat 7-day counts need a steeper exponent for the same hero
     # hierarchy; the slightly smaller titles match the mic frame's optical weight.
     # A birdless BirdWeather frame says "no recent detections nearby", not "listening".
+    # BirdWeather reports no per-species last_seen, so there is nothing to
+    # judge a fresh outline against; asking for one would only cost the page a
+    # query parameter it can do nothing with.
     for k, v in (("count_exp", 1.0), ("headline_px", 39), ("eyebrow_px", 17),
+                 ("fresh_minutes", 0), ("fade", "0"),
                  ("empty_text", "no recent detections nearby")):
         look.setdefault(k, v)
     return shoot(f"http://127.0.0.1:{port}/", out,
@@ -320,7 +346,9 @@ def main():
     ap.add_argument("--eyebrow-px", type=int, default=None,
                     help="eyebrow font px; default 18 for the mic, 17 for --bird-weather")
     ap.add_argument("--mat", type=float, default=0.04)
-    ap.add_argument("--collage-vh", type=float, default=52)
+    ap.add_argument("--collage-vh", type=float, default=74,
+                    help="share of the viewport height the collage gets; more source "
+                         "pixels for a full-panel opening, less for a small mat")
     ap.add_argument("--cluster-xbias", type=float, default=1.0)
     ap.add_argument("--cluster-ybias", type=float, default=1.2)
     ap.add_argument("--count-exp", type=float, default=None,
@@ -338,8 +366,15 @@ def main():
     ap.add_argument("--dsf", type=int, default=2)
     ap.add_argument("--user")
     ap.add_argument("--password")
-    ap.add_argument("--bird-names", action="store_true",
-                    help="show common names along the birds")
+    ap.add_argument("--bird-names", dest="bird_names", action="store_true", default=True,
+                    help="show common names along the birds (the default)")
+    ap.add_argument("--no-bird-names", dest="bird_names", action="store_false",
+                    help="draw the collage without names")
+    ap.add_argument("--fresh-minutes", type=int, default=30,
+                    help="outline birds heard this recently; 0 turns the mark off")
+    ap.add_argument("--fade", default="24-48",
+                    help='drain colour from birds over "<start>-<end>" hours of '
+                         'silence; 0 turns fading off')
     ap.add_argument("--timeout", type=int, default=45000)
     a = ap.parse_args()
     if a.bird_weather:
@@ -380,7 +415,7 @@ def main():
               cluster_ybias=a.cluster_ybias, count_exp=count_exp, cluster_pad=a.cluster_pad,
               small_floor=a.small_floor,
               window_hours=a.window_hours, timeout_ms=a.timeout, user=a.user, password=a.password,
-              bird_names=a.bird_names)
+              bird_names=a.bird_names, fresh_minutes=a.fresh_minutes, fade=a.fade)
     except Exception as e:
         print(f"shoot failed: {e}", file=sys.stderr)
         sys.exit(1)
