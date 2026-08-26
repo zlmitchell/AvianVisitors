@@ -547,40 +547,30 @@
     return h / 4294967296;
   }
 
-  // Call counts are snapped to these brackets before they decide a tile's size.
+  // Call counts are snapped to a geometric ladder before they decide a tile's
+  // size: every bracket is BRACKET_RATIO times the one below it, without end.
   //
   // The plate's areas are shares of one budget, so a tile's size depends on
   // every other bird's count as well as its own: one new detection anywhere
-  // resized everything, and a resized tile repacks the plate. On the website
-  // that was a reshuffle on each poll; on the frame, where a refresh is twelve
-  // seconds of full-panel redraw, it meant every bird jumped every time.
+  // resized everything, and a resized tile repacks the plate. Snapping fixes
+  // that - a count change too small to earn a refresh is also too small to move
+  // anything - and display.py's change signature snaps on the same ladder, so
+  // the two agree about what counts as a change.
   //
-  // These are exactly the brackets display.py's change signature already uses
-  // to decide whether a refresh is worth it. Sharing them makes the two agree:
-  // a count change too small to earn a refresh is now also too small to move
-  // anything, so a refresh driven by something else - a bird starting to sing,
-  // a bird fading - redraws the same plate with only that mark changed.
-  // Sizes now come in eight steps rather than a continuum, which reads as a
-  // clearer hierarchy, and the exponent below still shapes the ramp between them.
-  var COUNT_BRACKETS = [1, 2, 5, 15, 40, 100, 300, 1000];
-  // A bracket stands in for its members at its GEOMETRIC MIDPOINT, not at
-  // either edge. The edges look like the obvious choice and are not: a bird
-  // sitting just inside the bottom of a bracket would be lifted almost the
-  // whole width of it - a 420-call bird promoted to 1000 - while one at the top
-  // is not lifted at all. Since every area is a share of one budget, that
-  // lift comes straight out of the rest of the plate, so an arbitrary fact
-  // about where a count happens to fall shrinks every other bird. Measured
-  // over a plausible day's counts the upper edge inflates by 1.54x on average
-  // and anywhere from 1.0x to 2.5x bird by bird; the midpoint is 0.93x on
-  // average over a 0.61-1.44x spread, which is a distortion centred on nothing
-  // rather than one that always favours whoever is nearest a boundary.
+  // A ladder rather than the fixed table this started as. That table ran
+  // 1,2,5,...,1000 with everything above 1000 sharing one open bracket, which
+  // suited a microphone's per-day counts and quietly destroyed BirdWeather's:
+  // a real station week came back 828 to 5405, so nine birds of ten landed in
+  // that top bracket and rendered at identical size. "Too small to matter" is a
+  // ratio, not a number of detections, and a ratio works at any magnitude.
+  //
+  // 1.6 measured against both: it keeps all ten distinct sizes on a mic's day
+  // and five on a BirdWeather week, spanning the same range the raw counts did,
+  // while still asking for a 60% change before a bird moves.
+  var BRACKET_RATIO = 1.6;
   function bracketCount(n) {
-    var lo = 1;
-    for (var i = 0; i < COUNT_BRACKETS.length; i++) {
-      if (n <= COUNT_BRACKETS[i]) return Math.sqrt(lo * COUNT_BRACKETS[i]);
-      lo = COUNT_BRACKETS[i];
-    }
-    return Math.sqrt(1000 * 3000);  // the top bracket is open-ended; keep the ~3x step
+    if (!(n > 1)) return 1;
+    return Math.pow(BRACKET_RATIO, Math.round(Math.log(n) / Math.log(BRACKET_RATIO)));
   }
 
   // Decode and cache each mask once. Sparse cell-list form (only "on"

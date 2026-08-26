@@ -143,11 +143,20 @@ def slugify(sci):
     return re.sub(r"[^a-z0-9]+", "-", sci.lower()).strip("-")
 
 
+# Every bracket is this many times the one below it, without end. Must match
+# BRACKET_RATIO in apt.js: the renderer sizes tiles off this ladder and the
+# signature decides refreshes off it, and if they disagree the panel redraws for
+# changes the renderer does not make. There is a test.
+BRACKET_RATIO = 1.6
+
+
 def _bucket(n):
-    for i, edge in enumerate((1, 2, 5, 15, 40, 100, 300, 1000)):
-        if n <= edge:
-            return i
-    return 8
+    """Which rung of the ladder a count sits on. floor(x + 0.5) rather than
+    round(), because Python rounds a half to even and JavaScript rounds it up,
+    and the two halves have to land on the same rung for every count."""
+    if not n > 1:
+        return 0
+    return math.floor(math.log(n) / math.log(BRACKET_RATIO) + 0.5)
 
 
 def fetch_recent(base, hours, timeout, auth=None):

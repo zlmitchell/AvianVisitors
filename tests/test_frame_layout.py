@@ -339,17 +339,24 @@ def test_every_fade_step_has_a_stylesheet_rule():
 
 
 def test_tile_size_brackets_match_the_signature_brackets():
-    """The renderer sizes tiles off these and the signature buckets counts off
-    them. If they diverge, a count change can resize a bird without earning a
-    refresh - or earn one without changing anything."""
-    import ast
-    js = ast.literal_eval(js_const("COUNT_BRACKETS"))
-    # _bucket's own edges, recovered by probing it either side of each boundary.
-    edges = []
-    for n in range(1, 1200):
-        if display._bucket(n) != display._bucket(n + 1):
-            edges.append(n)
-    assert js == edges, f"apt.js {js} vs display.py {edges}"
+    """The renderer sizes tiles off the bracket ladder and the signature decides
+    refreshes off it. If the two ever snap differently, a count change can resize
+    a bird without earning a refresh - or earn one without changing anything."""
+    import math
+    js_ratio = float(js_const("BRACKET_RATIO"))
+    assert js_ratio == display.BRACKET_RATIO
+    for n in list(range(1, 400)) + [500, 828, 1012, 1767, 2931, 5405, 20000]:
+        # apt.js: Math.round(log(n)/log(r)); Python must land on the same rung
+        js_rung = math.floor(math.log(n) / math.log(js_ratio) + 0.5) if n > 1 else 0
+        assert display._bucket(n) == js_rung, f"n={n}"
+
+
+def test_brackets_do_not_collapse_a_real_birdweather_week():
+    """The fixed table this replaced ran out at 1000 and shared one open bracket
+    above it. A real station week for ZIP 13037 came back 828-5405, so nine birds
+    of ten sat in that bracket and drew at identical size."""
+    week = [5405, 2931, 2104, 1792, 1767, 1385, 1282, 1040, 1012, 828]
+    assert len({display._bucket(n) for n in week}) >= 5
 
 
 def test_the_bare_panel_opt_in_switches_the_fade_on():
@@ -376,9 +383,11 @@ def test_a_count_change_inside_one_bracket_moves_nothing():
     signature ignores is also a change that cannot resize a bird - and therefore
     cannot repack the plate. This is the invariant that stops the birds jumping."""
     a = species(("Melospiza melodia", 41, stamp(ANCHOR, 200)))
-    b = species(("Melospiza melodia", 99, stamp(ANCHOR, 200)))
+    b = species(("Melospiza melodia", 50, stamp(ANCHOR, 200)))
+    assert display._bucket(41) == display._bucket(50), "fixture drifted off one rung"
     assert display.signature(a) == display.signature(b)
-    crossed = species(("Melospiza melodia", 101, stamp(ANCHOR, 200)))
+    crossed = species(("Melospiza melodia", 80, stamp(ANCHOR, 200)))
+    assert display._bucket(80) != display._bucket(41)
     assert display.signature(a) != display.signature(crossed)
 
 
