@@ -164,7 +164,8 @@ base_url = "http://birdnet.local"
 shoot = true
 shoot_title = "Avian Visitors"
 shoot_subtitle = "Heard Today"
-# Names written along each bird. `birdframe-names off` drops them.
+# Names written along each bird. false drops them. (The birdframe-names
+# command rewrites this line for you; run it in a shell, not here.)
 bird_names = true
 fresh_minutes = 30   # outline a bird heard this recently; 0 turns the mark off
 fade_hours = 24      # silence before a bird fades; inert until hours is widened
@@ -216,7 +217,8 @@ else
     printf '%s\n' 'shoot = true         # this Pi renders the collage'
     printf '%s\n' 'shoot_title = "Avian Visitors"'
     printf '%s\n' 'shoot_subtitle = "Heard Today"'
-    printf '%s\n' '# Names along each bird. `birdframe-names off` drops them.'
+    printf '%s\n' '# Names along each bird. false drops them. (The birdframe-names'
+    printf '%s\n' '# command rewrites this line for you; run it in a shell, not here.)'
     printf '%s\n' 'bird_names = true'
     printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
     printf '%s\n' 'saturation = 0.6'

@@ -34,9 +34,9 @@ hours = 24
 # --- Titles and look (used when this Pi renders, i.e. shoot = true) ----------
 shoot_title = "Avian Visitors"
 shoot_subtitle = "Heard Today"
-# Every bird wears its name, written along its own outline. `birdframe-names
-# off` turns them off; keep the value on a line of its own, since that command
-# rewrites the whole line.
+# Every bird wears its name, written along its own outline. false drops them.
+# The birdframe-names command is a shortcut that rewrites this one line for you
+# and forces a refresh - run it in a shell, it is not something you write here.
 bird_names = true
 # shoot_headline_px = 42
 # shoot_eyebrow_px = 18

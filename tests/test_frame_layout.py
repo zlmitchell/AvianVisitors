@@ -557,6 +557,7 @@ def test_title_can_sit_at_either_end():
     # The fake shot's title band is 180px and its collage block 900px, so which
     # end the thin band lands at is the whole difference: compare the ink in the
     # top eighth of the composed panel.
+
     def top_ink(img):
         d = ImageChops.difference(img, Image.new("RGB", img.size, display._paper(img)))
         rows = list(d.convert("L").point(lambda p: 255 if p > 34 else 0)

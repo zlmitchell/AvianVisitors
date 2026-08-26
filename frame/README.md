@@ -108,6 +108,7 @@ Every bird wears its common name, written along its own outline — a back, a be
 Names are **on** by default. Existing frames keep whatever their `~/.birdframe/config.toml` already says, so a frame installed before this change needs one command:
 
 ```bash
+# in a shell on the frame Pi - these are commands, not config lines
 birdframe-names on
 birdframe-names off
 ```
