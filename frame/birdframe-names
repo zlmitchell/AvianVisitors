@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+#
+# The one-setting shortcut, kept because it is what the README and the config
+# file both tell people to run. It no longer knows how to edit TOML: reading
+# and writing the config are `config_tui.py --get` and `--set`, which is the
+# same pair of routines the settings screen uses and the only place in the
+# repo that rewrites a config line.
 
 set -euo pipefail
 umask 077
@@ -19,40 +25,6 @@ esac
 config=${BIRDFRAME_CONFIG:-$HOME/.birdframe/config.toml}
 [ -f "$config" ] || { echo "bird frame is not installed: $config is missing" >&2; exit 1; }
 
-# The trailing-comment strip matters: config.example.toml and install.sh both
-# annotate this line, and without it the value reads as "true# names written..."
-# and matches neither on nor off.
-current=$(awk -F= '
-  /^[[:space:]]*bird_names[[:space:]]*=/ {
-    value=$2; sub(/#.*/, "", value); gsub(/[[:space:]]/, "", value); print value; exit
-  }
-' "$config")
-current=${current:-false}
-
-if [ "$action" = status ]; then
-  [ "$current" = true ] && echo on || echo off
-  exit 0
-fi
-
-tmp=$(mktemp "${config}.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-awk -v value="$value" '
-  BEGIN { found=0 }
-  /^[[:space:]]*bird_names[[:space:]]*=/ {
-    print "bird_names = " value; found=1; next
-  }
-  { print }
-  END { if (!found) print "bird_names = " value }
-' "$config" >"$tmp"
-chmod 0600 "$tmp"
-mv "$tmp" "$config"
-trap - EXIT
-
-if [ "$current" = "$value" ]; then
-  echo "bird names already $action"
-  exit 0
-fi
-
 script_path=${BASH_SOURCE[0]}
 for _ in 1 2 3 4 5; do
   [ -L "$script_path" ] || break
@@ -67,5 +39,25 @@ done
 frame_dir=$(cd -P "$(dirname "$script_path")" && pwd)
 python_bin="$frame_dir/.venv/bin/python"
 [ -x "$python_bin" ] || { echo "frame environment is missing: $python_bin" >&2; exit 1; }
-"$python_bin" "$frame_dir/display.py" --config "$config" --force
+
+# --get prints nothing when the file does not set the key, which is not the
+# same as the default. A config written before names existed says nothing, and
+# has to count as off here so that `birdframe-names on` actually redraws it -
+# that upgrade is the whole reason this command is documented.
+current=$("$python_bin" "$frame_dir/config_tui.py" --config "$config" --get bird_names)
+current=${current:-false}
+
+if [ "$action" = status ]; then
+  [ "$current" = true ] && echo on || echo off
+  exit 0
+fi
+
+if [ "$current" = "$value" ]; then
+  echo "bird names already $action"
+  exit 0
+fi
+
+# --set writes the one line and forces the refresh; without the redraw the
+# panel keeps its old picture until the birds change.
+"$python_bin" "$frame_dir/config_tui.py" --config "$config" --set "bird_names=$value" >/dev/null
 echo "bird names $action"

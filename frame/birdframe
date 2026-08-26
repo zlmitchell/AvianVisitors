@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# The frame's command. `birdframe` on its own opens the settings screen; the
+# rest are one-liners that were already possible and are here so there is one
+# name to remember on the Pi.
+#
+#   birdframe                 edit every setting, then refresh once
+#   birdframe list            print the settings without opening the screen
+#   birdframe set k=v ...     change settings without the screen, then refresh
+#   birdframe preview out.png render to a PNG, leaving the panel alone
+#   birdframe refresh         redraw the panel now
+#   birdframe names on|off    the older, narrower command, unchanged
+#
+# Installed as a symlink in /usr/local/bin, so it resolves that before looking
+# for the venv beside itself - the same walk birdframe-names does.
+
+set -euo pipefail
+umask 077
+
+script_path=${BASH_SOURCE[0]}
+for _ in 1 2 3 4 5; do
+  [ -L "$script_path" ] || break
+  script_dir=$(cd -P "$(dirname "$script_path")" && pwd)
+  link_target=$(readlink "$script_path")
+  case "$link_target" in
+    /*) script_path=$link_target ;;
+    *) script_path=$script_dir/$link_target ;;
+  esac
+done
+[ ! -L "$script_path" ] || { echo "could not resolve the birdframe command" >&2; exit 1; }
+frame_dir=$(cd -P "$(dirname "$script_path")" && pwd)
+
+config=${BIRDFRAME_CONFIG:-$HOME/.birdframe/config.toml}
+
+action=${1:-config}
+[ $# -gt 0 ] && shift || true
+
+# Asking for help is the one thing that should still work on a machine where
+# the frame was never installed.
+if [ "$action" = -h ] || [ "$action" = --help ] || [ "$action" = help ]; then
+  sed -n '2,11p' "$script_path" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
+python_bin="$frame_dir/.venv/bin/python"
+[ -x "$python_bin" ] || { echo "frame environment is missing: $python_bin" >&2; exit 1; }
+
+case "$action" in
+  config)  exec "$python_bin" "$frame_dir/config_tui.py" --config "$config" "$@" ;;
+  list)    exec "$python_bin" "$frame_dir/config_tui.py" --config "$config" --list ;;
+  set)     [ $# -gt 0 ] || { echo "usage: birdframe set key=value [key=value ...]" >&2; exit 2; }
+           args=(); for pair in "$@"; do args+=(--set "$pair"); done
+           exec "$python_bin" "$frame_dir/config_tui.py" --config "$config" "${args[@]}" ;;
+  preview) [ $# -eq 1 ] || { echo "usage: birdframe preview out.png" >&2; exit 2; }
+           exec "$python_bin" "$frame_dir/config_tui.py" --config "$config" --preview "$1" ;;
+  refresh) exec "$python_bin" "$frame_dir/display.py" --config "$config" --force ;;
+  names)   exec "$frame_dir/birdframe-names" "$@" ;;
+  *)       echo "unknown command: $action" >&2
+           echo "try: birdframe, or birdframe list|set|preview|refresh|names" >&2
+           exit 2 ;;
+esac

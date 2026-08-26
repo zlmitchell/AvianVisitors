@@ -1,6 +1,14 @@
-# AvianVisitors e-ink frame. install.sh writes this for you; edit to taste.
+# AvianVisitors e-ink frame. This file IS what install.sh puts at
+# ~/.birdframe/config.toml - it copies this one and sets the handful of values
+# the mode you picked decides, so the frame carries the explanations with it
+# and there is only ever one description of a setting to keep right.
+#
+# Edit it by hand, or run `birdframe` for the same settings on one screen. That
+# editor rewrites a line at a time and leaves the comments alone, so the two
+# are interchangeable.
+#
 # config.toml is gitignored. Nothing here is secret unless your whole site is
-# behind basic-auth (see the bottom). This file is the full reference.
+# behind basic-auth (see the bottom).
 
 # --- Where the collage comes from -------------------------------------------
 # Default: mirror the BirdNET-Pi on your network. This Pi screenshots it.

@@ -17,6 +17,7 @@ MODE=local            # local | image | birdweather
 ZIP=""
 IMAGE_URL=""
 EBIRD_KEY=""
+GIVEN_ARGS=$#
 while [ $# -gt 0 ]; do
   case "$1" in
     --bird-weather) MODE=birdweather; shift ;;
@@ -32,6 +33,14 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+# Given no flags at a terminal, ask instead of assuming. Piped (curl | bash)
+# or given any flag, this is a no-op and the old behaviour stands; the answers
+# come back in the same variables and go through the same checks below.
+if [ "$GIVEN_ARGS" -eq 0 ] && [ -t 0 ] && [ -r /dev/tty ]; then
+  . "$FRAME/install-lib.sh"
+  frame_pick_mode
+fi
 
 if [ -n "$ZIP" ] && [ "$MODE" != birdweather ]; then
   echo "--zip only applies with --bird-weather" >&2
@@ -145,95 +154,26 @@ if [ "$NEEDS_BROWSER" = 1 ]; then
 fi
 
 echo "4/5  Writing config..."
-mkdir -p "$HOME/.birdframe"
 CONFIG="$HOME/.birdframe/config.toml"
 if [ -f "$CONFIG" ]; then
   EXISTING="$(sed -n 's/^# birdframe-mode: //p' "$CONFIG" | head -1)"
   if [ -n "$EXISTING" ] && [ "$EXISTING" != "$MODE" ]; then
     echo "     $CONFIG is set up for '$EXISTING' mode, not '$MODE'." >&2
-    echo "     To switch, remove it and re-run:  rm $CONFIG" >&2
+    echo "     Run 'birdframe' to switch it over, or remove it and re-run:" >&2
+    echo "       rm $CONFIG" >&2
     exit 1
   fi
   echo "     $CONFIG already exists, leaving it untouched."
-elif [ "$MODE" = local ]; then
-  cat > "$CONFIG.new" <<'CFG'
-# birdframe-mode: local
-# AvianVisitors frame, local mode: mirrors the BirdNET-Pi on your network.
-# This Pi screenshots birdnet.local itself, so there is nothing else to set up.
-base_url = "http://birdnet.local"
-shoot = true
-shoot_title = "Avian Visitors"
-shoot_subtitle = "Heard Today"
-# Names written along each bird. false drops them. (The birdframe-names
-# command rewrites this line for you; run it in a shell, not here.)
-bird_names = true
-fresh_minutes = 30   # outline a bird heard this recently; 0 turns the mark off
-fade_hours = 24      # silence before a bird fades; inert until hours is widened
-# Taken the matboard out? These five hand the whole extra opening to the birds
-# (the text stays the size it is), plus a second day fading out behind them:
-# opening = 0.97
-# opening_aspect = 0.75
-# collage_frac = 0.98
-# shoot_collage_vh = 74
-# hours = 48
-rotate = 90          # flip to 270 if the frame hangs the other way up
-saturation = 0.6
-timeout = 180        # a Zero 2 W needs ~70-120s to shoot the collage
-# If your BirdNET-Pi is behind basic-auth, uncomment and set these:
-# basic_user = "..."
-# basic_pass = "..."
-CFG
-mv "$CONFIG.new" "$CONFIG"
-elif [ "$MODE" = image ]; then
-  BASE="$(printf '%s' "$IMAGE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')"
-  # printf, not a heredoc: the URL is written literally, never shell-expanded.
-  {
-    printf '%s\n' '# birdframe-mode: image'
-    printf '%s\n' '# AvianVisitors frame, image mode: fetches a ready-made frame PNG.'
-    printf 'base_url = "%s"\n' "$BASE"
-    printf 'image_url = "%s"\n' "$IMAGE_URL"
-    printf '%s\n' 'shoot = false'
-    printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
-    printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Taken the matboard out? These five hand the whole extra opening to the birds"
-    printf '%s\n' "# (the text stays the size it is), plus a second day fading out behind them:"
-    printf '%s\n' "# opening = 0.97"
-    printf '%s\n' "# opening_aspect = 0.75"
-    printf '%s\n' "# collage_frac = 0.98"
-    printf '%s\n' "# shoot_collage_vh = 74"
-    printf '%s\n' "# hours = 48"
-  } > "$CONFIG.new"
-  mv "$CONFIG.new" "$CONFIG"
 else
-  # birdweather: this Pi renders from BirdWeather near $ZIP, gated on the same
-  # signature as the other modes - it only redraws when the local top birds change.
-  {
-    printf '%s\n' '# birdframe-mode: birdweather'
-    printf '%s\n' '# AvianVisitors frame, BirdWeather mode: renders the top birds near a ZIP.'
-    printf '%s\n' 'species_source = "birdweather"'
-    printf 'zip = "%s"\n' "$ZIP"
-    printf '%s\n' 'bw_days = 7          # BirdWeather lookback window, in days'
-    printf '%s\n' 'bw_country = "us"    # geocoder country for the ZIP'
-    printf '%s\n' 'shoot = true         # this Pi renders the collage'
-    printf '%s\n' 'shoot_title = "Avian Visitors"'
-    printf '%s\n' 'shoot_subtitle = "Heard Today"'
-    printf '%s\n' '# Names along each bird. false drops them. (The birdframe-names'
-    printf '%s\n' '# command rewrites this line for you; run it in a shell, not here.)'
-    printf '%s\n' 'bird_names = true'
-    printf '%s\n' 'rotate = 90          # flip to 270 if the frame hangs the other way up'
-    printf '%s\n' 'saturation = 0.6'
-    printf '%s\n' "# Taken the matboard out? These five hand the whole extra opening to the birds"
-    printf '%s\n' "# (the text stays the size it is), plus a second day fading out behind them:"
-    printf '%s\n' "# opening = 0.97"
-    printf '%s\n' "# opening_aspect = 0.75"
-    printf '%s\n' "# collage_frac = 0.98"
-    printf '%s\n' "# shoot_collage_vh = 74"
-    printf '%s\n' "# hours = 48"
-  } > "$CONFIG.new"
-  mv "$CONFIG.new" "$CONFIG"
+  # config.example.toml is the one description of every setting the frame has.
+  # This writes it out with the mode's values already set, rather than keeping
+  # a second, shorter, drifting copy of the same defaults in this file. --zip
+  # and --image-url are ignored by the modes that do not use them.
+  .venv/bin/python config_tui.py --config "$CONFIG" --init "$MODE" --zip "$ZIP" --image-url "$IMAGE_URL"
 fi
 
 sudo ln -sfn "$FRAME/birdframe-names" /usr/local/bin/birdframe-names
+sudo ln -sfn "$FRAME/birdframe" /usr/local/bin/birdframe
 
 echo "5/5  Installing systemd service + timer..."
 # Every mode runs display.py against the config on the standard 15-minute timer;
@@ -260,8 +200,7 @@ case "$MODE" in
 
 Installed. The frame mirrors birdnet.local on your network and refreshes every
 15 min, only when the birds change. Until the mic has heard its first bird it
-shows a plain title card. If the panel hangs upside down, set rotate = 270 in
-~/.birdframe/config.toml.
+shows a plain title card.
 DONE
     ;;
   image)
@@ -299,6 +238,12 @@ FLAG
     fi
     ;;
 esac
+
+cat <<'SETTINGS'
+To change anything - the title, the names, which way up it hangs, or the whole
+layout if you take the matboard out - run:
+  birdframe
+SETTINGS
 
 # SPI only takes effect on a reboot, so do it for the user. Skip if SPI is
 # already up (e.g. a re-run) so we don't bounce a working frame.
