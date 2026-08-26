@@ -52,7 +52,10 @@ git clone https://github.com/Twarner491/AvianVisitors
 cd AvianVisitors/frame
 ```
 
-Pick how the frame gets its birds:
+Run `./install.sh` and it asks how the frame should get its birds — enter through
+the questions is the default install. Or say so on the command line and it asks
+nothing, which is also what happens when the installer is piped (`curl | bash`),
+since there is no terminal to ask at:
 
 ```bash
 # Pair with your bird mic on the same network (birdnet.local). The default.
@@ -68,6 +71,43 @@ Pick how the frame gets its birds:
 Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml`. Full options live in [`config.example.toml`](config.example.toml).
 
 On a **first** install SPI is not up yet, so it reboots and the timer draws the first frame about two minutes later. On a **re-run or upgrade** SPI is already up, so it restarts the units and forces one render immediately — without that the panel would sit on the old picture, because an upgrade changes how the frame renders but not what the birds are doing, and the change-gate would correctly decide there was nothing to redraw.
+
+A re-run also skips whatever is already done: SPI, the apt packages, the venv, the Python deps and the Chromium download are each checked before being installed, so an upgrade goes more or less straight to the render.
+
+## 3. Changing settings
+
+`birdframe` opens every setting on one screen, over ssh, and refreshes the panel
+once when you save:
+
+```bash
+birdframe
+```
+
+Arrows move, left/right or space changes a switch, enter types a value, `d` puts
+one back to its default, `p` writes a preview PNG without touching the panel,
+`s` saves. Nothing reaches the config until you save, and nothing reaches the
+panel unless something actually changed — a refresh is 1–2 minutes on a Zero 2 W,
+so it is worth spending only once.
+
+Three things it does that hand-editing does not:
+
+- **The layout preset.** The five keys in the table below move as one row, not as
+  five edits that are only correct together.
+- **Switching source after install** — `birdnet.local`, BirdWeather, or a
+  ready-made PNG. `install.sh` refuses to do this to an existing config.
+- **The refresh.** Otherwise the panel keeps the picture it has until a bird
+  changes, which from across the room looks exactly like the setting not working.
+
+`~/.birdframe/config.toml` is still an ordinary file and still the reference —
+the editor rewrites one line at a time and leaves every comment in it alone, so
+the two are interchangeable. Without a terminal, or for scripting:
+
+```bash
+birdframe list                       # every setting and where it came from
+birdframe set rotate=270             # change one, then refresh
+birdframe preview /tmp/frame.png     # render to a PNG, leave the panel alone
+birdframe refresh                    # redraw now
+```
 
 ### Layout: the mat, or the bare panel
 
@@ -87,7 +127,7 @@ A default install draws into the **A5 window of the A4 frame from the BOM** — 
 
 `opening` is the opening's height as a fraction of the panel and `opening_aspect` is its width over its height, so the pair describes the bare panel and any mat you cut for one. `collage_frac` is the share of the opening's width the collage fills. `shoot_collage_vh` decides how many source pixels the birds are drawn with before being resampled onto the panel — 52 suits the small opening, 74 the large one, and much past 76 the title runs out of viewport.
 
-**Move all five or none.** And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
+**Move all five or none** — which is what the `layout preset` row in `birdframe` is for; it is the top row of the Panel section and flips the whole table in one keypress. And `hours = 48` is only affordable *because* the opening got bigger: see [the size note under Birds going quiet](#birds-going-quiet).
 
 One trade worth knowing: holding the names still means the browser rasterises them at about half the pixel size it used to, because there is much less downscale afterwards to sharpen them. On the bare panel they are a shade less crisp than the same physical size in the A5 mat. Raising `dsf` would fix it, at a memory cost a Zero 2 W does not have.
 
@@ -113,6 +153,9 @@ birdframe-names on
 birdframe-names off
 ```
 
+(`birdframe names on|off` is the same command; `bird_names` is also a switch on
+the `birdframe` screen, under Titles and look.)
+
 Either one saves the preference and requests an immediate refresh.
 
 Those are **commands you run in a shell on the Pi**, not lines for `config.toml`. The setting they write is `bird_names = true`; putting `birdframe-names = on` in the config file makes it invalid TOML and the frame refuses to start (it will say so, and name the line).
@@ -121,7 +164,13 @@ For an `--image-url` frame there is no local render to change, so the frame inst
 
 ### Which bird is singing now
 
-A bird heard in the last `fresh_minutes` (30 by default) is outlined on the panel, traced round its own silhouette in the Spectra red. The outline comes off once that bird has been quiet for the window. Set `fresh_minutes = 0` to turn the mark off.
+A bird heard in the last `fresh_minutes` (30 by default) is outlined on the panel: a pair of thin black rules following its own silhouette, standing a hairline of paper off the drawing rather than lying along its edge. The outline comes off once that bird has been quiet for the window. Set `fresh_minutes = 0` to turn the mark off.
+
+**Why it is drawn the way it is.** Three decisions, each of which was wrong first. It is offset rather than traced on the edge because a line lying along the drawing competes with it — red on a blue jay read cleanly, the same red on a cardinal vanished into the plumage — and once it stands off the bird, black reads on any plumage and costs nothing a colour was buying. It is two rules rather than one because a single line off a bird reads as a stray contour of the illustration where a pair reads as something added on purpose. And it is sized off the same call that sizes the bird names, because the mark is meant to look like the pen that wrote them came round the bird; sizing it off the tile instead agreed with the type only until the type hit its cap, past which the biggest birds drew a 6px rule beside their own 2px name.
+
+The stand-off is in type sizes and the gap between the two rules is in stroke widths, which is not an inconsistency: how far the mark stands off the bird is a relationship to the drawing and the lettering around it, where whether a pair reads as a pair is a relationship to the line itself. Setting both in type sizes closes the channel to about a pixel on a one-call bird's tile and the two rules fuse into one blob.
+
+Offsetting a traced silhouette is not free. Which side is out is settled once for the whole curve by letting every point probe for ink and vote, rather than per point: a point that decides wrong does not lean slightly, it lands two gaps across on the far side of the bird, and enough of those turn the mark into a sawtooth. Where the shape has a notch narrower than twice the stand-off — between the legs, under the tail, around the toes — the offset folds back over itself, so those points are dropped and the mark simply goes quiet there. A rule that stops short of a bird's feet still reads as a rule.
 
 It reads the `last_seen` and `anchor` the recent API already returns, so there is nothing to install and nothing new to configure — but that also means it needs a mic. BirdWeather reports no per-species last-heard time, so nothing is ever outlined in `--bird-weather` mode.
 

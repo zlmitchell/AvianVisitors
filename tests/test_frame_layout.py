@@ -391,6 +391,76 @@ def test_a_count_change_inside_one_bracket_moves_nothing():
     assert display.signature(a) != display.signature(crossed)
 
 
+
+# --- the singing rule -------------------------------------------------------
+# Both of these guard a mistake that shipped, was rendered, and was only caught
+# by looking at the panel. Like the bracket tests above they read the renderer's
+# own constants rather than restating them.
+def js_num(name):
+    """A number out of apt.js, whether or not it is first on its `var` line."""
+    import re
+    m = re.search(r"\b" + name + r" = (-?[\d.]+)", APT_JS)
+    assert m, f"{name} is gone from apt.js"
+    return float(m.group(1))
+
+
+def _fresh_body(fn, end):
+    start = APT_JS.index("function " + fn)
+    return APT_JS[start:APT_JS.index(end, start)]
+
+
+def test_the_singing_rule_is_sized_off_the_same_type_as_the_names():
+    """The rule is meant to read as the pen that wrote the names, so it takes
+    its weight from the same call the lettering does. It used to work out its
+    own share of the tile, which agreed with the type only while the type was
+    still growing - markType() clamps at LABEL_MAX_PX and a raw share of the
+    tile does not. Past the clamp the two silently came apart, and the biggest
+    birds drew a 6px rule beside their own 2px name."""
+    body = _fresh_body("freshStrokeWidth", "  }")
+    assert "markType(" in body, "the rule no longer takes its size from the type"
+    assert "Math.sqrt" not in body, "the rule is sizing itself off the tile again"
+
+
+def test_the_singing_rule_settles_its_outward_side_once():
+    """Which way is out was decided per point, by probing 1.5 tile pixels along
+    the normal converted into mask space. Masks are about 54 cells across
+    against a tile of a few hundred, so that step came to a third of a cell,
+    rounded to zero, and sampled the boundary point itself - 54 sign changes
+    around a cardinal's 145 points, where a clean shape has none. A point that
+    came out wrong did not lean slightly: it landed two gaps across on the far
+    side of the bird, which is what turned the mark into a sawtooth."""
+    body = _fresh_body("freshPath", "function freshStrokeWidth")
+    assert "/ sx) * 1.5" not in body, "the probe is being scaled into mask space again"
+    assert body.count("var sign = ") == 1, "the outward side is being decided more than once"
+
+
+def test_the_two_singing_rules_never_close_up():
+    """Why the rule-to-rule gap is in stroke widths where the stand-off is in
+    type sizes. In type sizes it looks tidier and closes to about a pixel on a
+    one-call bird's tile, where the pair fuses into a single blob; the channel
+    has to stay at least a stroke wide for the mark to read as two rules at
+    all."""
+    stroke, floor = js_num("FRESH_STROKE"), js_num("FRESH_STROKE_MIN")
+    rule_gap = js_num("FRESH_RULE_GAP")
+    for cap in range(int(js_num("LABEL_MIN_PX")), int(js_num("LABEL_MAX_PX")) + 1):
+        fw = max(floor, cap * stroke)
+        channel = fw * rule_gap - fw
+        assert channel >= fw, f"{cap}px type: {channel:.2f}px of paper under a {fw:.2f}px rule"
+
+
+def test_the_singing_rule_stands_clear_of_the_bird_at_every_size():
+    """The stand-off scales with the type and the stroke has a floor in pixels,
+    so at the small end the floor could in principle eat the stand-off and put
+    the line back down on the drawing - which is the one thing offsetting it
+    was for."""
+    stroke, floor = js_num("FRESH_STROKE"), js_num("FRESH_STROKE_MIN")
+    gap = js_num("FRESH_GAP")
+    for cap in range(int(js_num("LABEL_MIN_PX")), int(js_num("LABEL_MAX_PX")) + 1):
+        fw = max(floor, cap * stroke)
+        paper = cap * gap - fw / 2
+        assert paper >= fw, f"{cap}px type: rule sits {paper:.2f}px off a {fw:.2f}px silhouette"
+
+
 # --- per-run overrides ------------------------------------------------------
 @pytest.mark.parametrize("pair,key,expected", [
     ("fresh_minutes=0", "fresh_minutes", 0),

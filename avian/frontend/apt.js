@@ -879,6 +879,17 @@
     return Math.round(Math.min(LABEL_MAX_PX, Math.sqrt(W * H) * 0.16) * MARK_SCALE);
   }
 
+  // The type size this tile actually sets a name in - the cap, floored so a
+  // small tile still gets letters that read. Both the lettering and the
+  // still-singing rule are sized off this one call, because the rule is meant
+  // to look like it was drawn with the pen that wrote the names, and two
+  // expressions for one size drift: the rule used to derive its own and
+  // silently came apart from the type at the top of the range, where the cap
+  // stops growing and a raw share of the tile does not.
+  function markType(W, H) {
+    return Math.max(LABEL_MIN_PX, labelCap(W, H));
+  }
+
   // Trace the silhouette's outline in order (Moore boundary walk). A
   // per-column profile cannot see a wing's edge, which is exactly where a
   // flying bird's longest straight run lives. Cached per slug: the trace
@@ -951,20 +962,45 @@
   // touching localStorage.
   var FRESH_MIN = 30;
   var freshParam = /[?&]fresh=(\d+)\b/.exec(location.search);
-  // Stroke weight as a share of the tile's geometric mean, floored so a
-  // one-call bird's small tile still carries a line the e-ink dither can hold
-  // (below about two device pixels Floyd-Steinberg breaks it into dashes).
-  // 0.016, down from the 0.022 this started at: that was judged on a plate whose
-  // collage was scaled to 0.44 on its way to the panel, and the default now
-  // scales to 0.61, which made the same number draw a sticker border rather
-  // than an outline. Both bounds go through MARK_SCALE with the type, so the
-  // weight is the same on the wall whatever the opening.
-  var FRESH_STROKE = 0.016, FRESH_STROKE_MIN = 2;
-  // Paper between the silhouette and the first line, and between the two lines,
-  // both in stroke widths so the whole mark scales as one thing. Two concentric
-  // rules rather than one: a single line off the bird can read as a stray
-  // contour of the drawing, where a pair reads as something added on purpose.
-  var FRESH_GAP = 1.6, FRESH_RULES = 2, FRESH_RULE_GAP = 1.9;
+  // Stroke weight as a share of the TYPE SIZE the tile sets its name in,
+  // floored so a one-call bird's small tile still carries a line the e-ink
+  // dither can hold (below about two device pixels Floyd-Steinberg breaks it
+  // into dashes).
+  //
+  // A share of the type rather than of the tile, because the rule is supposed
+  // to read as the pen that wrote the names coming round the bird. The old
+  // 0.016 of the tile's geometric mean was reaching for the same thing, but it
+  // only held while the type was still growing: markType() clamps at
+  // LABEL_MAX_PX and a raw share of the tile does not, so on the biggest tiles
+  // the lettering stopped and the rule kept going. Measured off the panel, a
+  // cardinal carried a 6px rule beside its own 2-3px name. Read off markType()
+  // the two cannot come apart, and the clamp and MARK_SCALE come along free.
+  //
+  // 0.06 is measured, not derived. Caveat's own stem at this size is nearer a
+  // sixteenth of the em than a tenth, so the tenth that fell out of the old
+  // constants still drew a rule half again as heavy as the name beside it.
+  // The floor is in tile pixels against the shipped plate, where the collage
+  // is scaled up on its way to the panel - 1.1 here is about two device pixels
+  // there, which is where Floyd-Steinberg starts breaking a line into dashes.
+  var FRESH_STROKE = 0.06, FRESH_STROKE_MIN = 1.1;
+  // Paper between the silhouette and the first rule, in TYPE sizes: how far the
+  // mark stands off the drawing is a relationship to the bird and to the
+  // lettering around it. Paper between the two rules, in STROKE widths: whether
+  // a pair reads as a pair is a relationship to the line itself. Setting the
+  // second in type sizes as well looks tidier and is wrong - on a one-call
+  // bird's tile it closes the channel to a single pixel and the two rules fuse
+  // into one blob, where in stroke widths it holds near three pixels the whole
+  // way down the range. Two rules rather than one: a single line off the bird
+  // can read as a stray contour of the drawing, where a pair reads as something
+  // added on purpose.
+  //
+  // 0.22 of the type is a hairline of paper, not a moat. Stood off twice that
+  // the mark stops describing the bird and starts reading as a die-cut sticker
+  // laid over it - the shape is still the bird's, but at that distance from a
+  // silhouette this coarse it has lost the crest and the tail and kept only the
+  // blob. Closer than this and it goes back to competing with the drawing,
+  // which is what standing it off was for.
+  var FRESH_GAP = 0.22, FRESH_RULES = 2, FRESH_RULE_GAP = 2.6;
 
   function freshWindowMs() {
     var mins = freshParam ? +freshParam[1] : FRESH_MIN;
@@ -1046,19 +1082,37 @@
   }
 
   // The silhouette's own boundary, pushed OUT into the paper by `gap` tile
-  // pixels, as one closed path. Offset rather than traced on the edge because a
-  // line lying along the drawing competes with it: a red outline on a red
-  // cardinal all but vanished, while the same line on a blue jay read cleanly.
-  // Standing the mark off the bird makes it legible against any plumage, and
-  // black then costs nothing that a colour was buying.
+  // pixels, as one closed path or as the open runs of one. Offset rather than
+  // traced on the edge because a line lying along the drawing competes with it:
+  // a red outline on a red cardinal all but vanished, while the same line on a
+  // blue jay read cleanly. Standing the mark off the bird makes it legible
+  // against any plumage, and black then costs nothing that a colour was buying.
   //
-  // The outward direction is found per point rather than from the winding,
-  // which outline() does not fix, or from the centroid, which is wrong for
-  // every concave shape a bird has - between the legs, under the tail. The
-  // normal is taken from the local tangent and then disambiguated by probing:
-  // whichever side is not ink is out. A large enough gap will still cross
-  // itself in a deep notch, which is why the gaps below are small multiples of
-  // the stroke rather than free numbers.
+  // Which side is out is settled ONCE for the whole curve. outline() walks a
+  // simple closed loop in a consistent direction, so there is one outward side
+  // for all of it; every point probes its own normal for ink and votes, and the
+  // majority carries. The first version asked the question per point instead,
+  // and a point that answered wrong did not lean slightly - it landed 2*gap
+  // across on the far side of the bird. That is what turned the mark into a
+  // sawtooth. It could not have answered right either: the probe stepped 1.5
+  // TILE pixels converted into mask space, and a mask is about 54 cells across
+  // against a tile of a few hundred, so the step came to a third of a cell and
+  // rounded to zero - it sampled the boundary point itself and read back
+  // whichever side the smoothing happened to leave it on. Measured on the
+  // shipped code that was 54 sign changes around a cardinal's 145 points, where
+  // a clean shape has none. Probing in mask cells fixes the measurement;
+  // voting makes any one wrong answer harmless.
+  //
+  // The reach has to cross a thin feature. A probe shorter than the tail is
+  // wide has the far wall answering for the near one, and then every point
+  // along that tail votes the same wrong way and the vote cannot save it.
+  //
+  // A notch narrower than twice the gap still folds the offset back over
+  // itself - between the legs, under the tail, around the toes. Rather than
+  // draw the fold, an offset point that lands back in ink or back within reach
+  // of any part of the source curve is dropped, and the mark goes quiet there.
+  // A rule that stops short of a bird's feet still reads as a rule; the fold
+  // read as a scribble.
   //
   // Returns '' for a shape outline() could not trace, which leaves that bird
   // unmarked rather than boxed.
@@ -1067,25 +1121,64 @@
     if (!out || !out.pts || out.pts.length < 8) return '';
     var sx = t.fullW / out.w, sy = t.fullH / out.h;
     var pts = out.pts, n = pts.length;
-    var arm = Math.max(2, Math.round(n * 0.012)), d = [], i;
+    var arm = Math.max(2, Math.round(n * 0.012)), i, j, k;
+
+    var reach = Math.max(2, Math.ceil(gap / Math.max(sx, sy)) + 1);
+    var normals = [], vote = 0;
     for (i = 0; i < n; i++) {
       var p = pts[i], a = pts[(i - arm + n) % n], b = pts[(i + arm) % n];
-      var tx = (b[0] - a[0]) * sx, ty = (b[1] - a[1]) * sy;
-      var len = Math.hypot(tx, ty) || 1;
-      var nx = ty / len, ny = -tx / len;
-      // Probe a step along the normal in mask space; if that lands in ink this
-      // is the inward side, so take the other one.
-      if (out.at(Math.round(p[0] + (nx / sx) * 1.5), Math.round(p[1] + (ny / sy) * 1.5))) {
-        nx = -nx; ny = -ny;
+      var mx = b[0] - a[0], my = b[1] - a[1];          // tangent, mask space
+      var ml = Math.hypot(mx, my) || 1;
+      var qx = my / ml, qy = -mx / ml;                 // its normal, mask space
+      var plus = 0, minus = 0;
+      for (k = 1; k <= reach; k++) {
+        plus += out.at(Math.round(p[0] + qx * k), Math.round(p[1] + qy * k));
+        minus += out.at(Math.round(p[0] - qx * k), Math.round(p[1] - qy * k));
       }
-      d.push((i ? 'L' : 'M') + (p[0] * sx + nx * gap).toFixed(1) +
-             ' ' + (p[1] * sy + ny * gap).toFixed(1));
+      if (plus < minus) vote++; else if (minus < plus) vote--;
+      var tx = mx * sx, ty = my * sy;                  // and the same in tile space
+      var tl = Math.hypot(tx, ty) || 1;
+      normals.push([ty / tl, -tx / tl]);
     }
-    return d.join(' ') + ' Z';
+    var sign = vote >= 0 ? 1 : -1;
+
+    var src = [], off = [], keep = [], whole = true, near = gap * 0.75;
+    for (i = 0; i < n; i++) src.push([pts[i][0] * sx, pts[i][1] * sy]);
+    for (i = 0; i < n; i++) {
+      var ox = src[i][0] + sign * normals[i][0] * gap;
+      var oy = src[i][1] + sign * normals[i][1] * gap;
+      off.push([ox, oy]);
+      var ok = !out.at(Math.round(ox / sx), Math.round(oy / sy));
+      for (j = 0; ok && j < n; j++) {
+        var dx = ox - src[j][0], dy = oy - src[j][1];
+        if (dx * dx + dy * dy < near * near) ok = false;
+      }
+      keep.push(ok);
+      if (!ok) whole = false;
+    }
+
+    var d = [], run = [];
+    var step = function (q, first) {
+      return (first ? 'M' : 'L') + q[0].toFixed(1) + ' ' + q[1].toFixed(1);
+    };
+    if (whole) {
+      for (i = 0; i < n; i++) d.push(step(off[i], !i));
+      return d.join(' ') + ' Z';
+    }
+    // Walk from a break, so a surviving run is never cut in two at the seam.
+    var from = 0;
+    while (keep[from]) from++;
+    for (i = 0; i <= n; i++) {
+      j = (from + i) % n;
+      if (i < n && keep[j]) { run.push(step(off[j], !run.length)); continue; }
+      if (run.length >= 3) d.push(run.join(' '));
+      run = [];
+    }
+    return d.join(' ');
   }
 
   function freshStrokeWidth(t) {
-    return Math.max(FRESH_STROKE_MIN, Math.sqrt(t.fullW * t.fullH) * FRESH_STROKE) * MARK_SCALE;
+    return Math.max(FRESH_STROKE_MIN, markType(t.fullW, t.fullH) * FRESH_STROKE);
   }
 
   // What makes an edge worth writing along, as one number in 0..1. Three
@@ -2105,7 +2198,7 @@
       // A quiet bird may have a very small tile, but names-on still means
       // every bird is named. The tangent fallback can carry readable type
       // beyond the silhouette, and the packer reserves that whole label.
-      var maxPx = Math.max(LABEL_MIN_PX, labelCap(t.fullW, t.fullH));
+      var maxPx = markType(t.fullW, t.fullH);
       var plan = planLabel(out, name, t.fullW, t.fullH, maxPx);
       if (!plan) return;
       t.labelPx = plan.px;
@@ -2478,9 +2571,10 @@
       // Inserted before the name so the lettering stays the topmost ink on the
       // tile - the stroke marks the bird, it does not compete with reading it.
       if (isFresh(s, freshCut)) {
-        var fw = freshStrokeWidth(r), rules = [], ri;
+        var fw = freshStrokeWidth(r), ft = markType(r.fullW, r.fullH);
+        var rules = [], ri;
         for (ri = 0; ri < FRESH_RULES; ri++) {
-          var fd = freshPath(r, fw * (FRESH_GAP + ri * FRESH_RULE_GAP));
+          var fd = freshPath(r, ft * FRESH_GAP + ri * fw * FRESH_RULE_GAP);
           if (fd) rules.push('<path d="' + fd + '" stroke-width="' + fw.toFixed(2) + '"/>');
         }
         if (rules.length) {
