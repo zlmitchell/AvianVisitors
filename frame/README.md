@@ -68,7 +68,7 @@ since there is no terminal to ask at:
 ./install.sh --image-url https://bird.onethreenine.net/frame.png?k=YOUR_FRAME_KEY
 ```
 
-Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml`. Full options live in [`config.example.toml`](config.example.toml).
+Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml` — which is [`config.example.toml`](config.example.toml) with your mode's values set, so every option and the reasoning behind it is on the Pi with you.
 
 On a **first** install SPI is not up yet, so it reboots and the timer draws the first frame about two minutes later. On a **re-run or upgrade** SPI is already up, so it restarts the units and forces one render immediately — without that the panel would sit on the old picture, because an upgrade changes how the frame renders but not what the birds are doing, and the change-gate would correctly decide there was nothing to redraw.
 
@@ -185,6 +185,8 @@ A bird that has not been heard for `fade_hours` (24) starts losing its colour, d
 **This is off on a default install**, because `hours` is also 24 — there is no tail past the fade point, so nothing dims. Widening the window is the single thing that switches it on; `fade_hours` is already sitting there waiting for a tail to run down.
 
 Spectra 6 has six inks and nothing between them, so there is no grey to fade through: the dither renders a faded bird as sparse black stipple on cream. It reads as fading from across a room and as stipple up close. On the website the same ramp is a smooth grey, and hovering a quiet bird brings it back to full strength.
+
+**The bird fades; its name does not.** The fade is applied in two halves. Draining the colour goes on the whole tile, so a quiet bird's name goes monochrome along with it. Thinning the ink goes on the bird's image only. Both used to go on the tile, which on a screen looks right — but with no grey in the palette, a name at 55% is not pale lettering, it is 2px strokes broken into stipple, and past the third step you could no longer read *which* bird was going quiet. That is the one thing the fade is there to say, and quiet birds have the small tiles and the small type to begin with. Greying black lettering costs it nothing, so the name keeps its density the whole way down.
 
 Five steps rather than a gradient, and for the same reason the singing mark is an outline rather than a clock — no partial refresh, so anything continuous would redraw the whole panel to move one bird a shade paler. Each step is folded into the change signature, so the panel redraws when a bird visibly dims and not otherwise. The 15-minute timer caps the day at 96 redraws whatever happens.
 

@@ -3371,10 +3371,26 @@ body.av-local #dd-items  { display: block; }
   font-display: swap;
 }
 /* Going quiet: five steps of colour draining out of a bird that has not been
-   heard for a while (see the fade run in apt.js, which sets data-fade). The
-   filter sits on the tile rather than on its image so the bird's name drains
-   with it - a crisp name over a ghost bird reads as a rendering fault, not as
-   a bird that has gone quiet.
+   heard for a while (see the fade run in apt.js, which sets data-fade).
+
+   The two halves of the fade are applied at different levels, and the split is
+   the whole point. GREY goes on the tile, so the name goes monochrome with the
+   bird it belongs to. OPACITY goes on the image alone, so the bird thins out
+   and the lettering keeps its density.
+
+   Both sat on the tile first, on the reasoning that a crisp name over a ghost
+   bird would read as a rendering fault. On a screen it might. On the panel it
+   is the other way round, and the reason is the palette: six inks and no grey.
+   Greying black lettering costs it nothing - grey of black is still black -
+   but dropping it to 55% opacity does not make it pale, it breaks 2px strokes
+   into stipple, and by the third step you cannot read which bird is leaving.
+   That is the one thing the fade exists to say. A crisp name over a drained
+   bird turns out to read as exactly what it is: a label still there for a bird
+   that has gone.
+
+   The name is also the smallest ink on a quiet bird's tile - quiet birds have
+   low counts, low counts get small tiles, small tiles get small type - so it
+   is the first thing the dither loses and the last thing that can afford it.
 
    Grey runs ahead of weight. Colour is the first thing a bird loses, because
    losing it says "a while ago" without yet saying "nearly gone"; opacity only
@@ -3387,14 +3403,22 @@ body.av-local #dd-items  { display: block; }
    comment in apt.js. Transitions are off: on the website these only ever change
    between renders, and on the frame there is nothing to animate. */
 .gtile[data-fade] { transition: none; }
-.gtile[data-fade="1"] { filter: grayscale(0.35); opacity: 0.91; }
-.gtile[data-fade="2"] { filter: grayscale(0.60); opacity: 0.82; }
-.gtile[data-fade="3"] { filter: grayscale(0.80); opacity: 0.73; }
-.gtile[data-fade="4"] { filter: grayscale(0.92); opacity: 0.64; }
-.gtile[data-fade="5"] { filter: grayscale(1);    opacity: 0.55; }
-/* Hovering a quiet bird brings it back, so the pill and the cutout can be read
-   at full strength without waiting for the bird to sing again. */
-.gtile[data-fade].is-hover { filter: none; opacity: 1; }
+.gtile[data-fade="1"] { filter: grayscale(0.35); }
+.gtile[data-fade="2"] { filter: grayscale(0.60); }
+.gtile[data-fade="3"] { filter: grayscale(0.80); }
+.gtile[data-fade="4"] { filter: grayscale(0.92); }
+.gtile[data-fade="5"] { filter: grayscale(1); }
+.gtile[data-fade="1"] img { opacity: 0.91; }
+.gtile[data-fade="2"] img { opacity: 0.82; }
+.gtile[data-fade="3"] img { opacity: 0.73; }
+.gtile[data-fade="4"] img { opacity: 0.64; }
+.gtile[data-fade="5"] img { opacity: 0.55; }
+/* Hovering a quiet bird brings it back, so the cutout can be read at full
+   strength without waiting for the bird to sing again. Two rules because the
+   fade is now in two places; leaving the grey on the tile is also what keeps
+   this clear of .gtile.is-hover img, which carries the lift shadow. */
+.gtile[data-fade].is-hover { filter: none; }
+.gtile[data-fade].is-hover img { opacity: 1; }
 
 /* A bird heard inside the fresh window wears its own outline (see the
    fresh-detection run in apt.js). The path is the traced silhouette in tile
