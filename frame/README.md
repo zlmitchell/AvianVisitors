@@ -89,6 +89,15 @@ Two numbers describe the opening, and three more divide it up:
 
 Check it before hanging anything: `display.py --preview out.png --mat-box` writes an approximate six-ink dither with the opening outlined in red, on any machine, no panel needed.
 
+Any config value can be overridden for one run with `-o key=value`, repeatable, without touching `config.toml` — which is how to try a setting on the actual panel before committing to it:
+
+```bash
+# the old A5 mat, just for this render
+display.py --config ~/.birdframe/config.toml --force   -o opening=0.7071 -o opening_aspect=0.7071   -o title_frac=0.065 -o collage_frac=0.66 -o gap_frac=0.1
+```
+
+An unknown key is an error rather than a silent no-op, so a typo cannot look like "that setting does nothing".
+
 If you enlarge the opening a lot, raise `shoot_collage_vh` with it (74 by default, was 52). The render is a fixed 1200x1600 whatever happens, so that number decides how many source pixels the birds and their names are drawn with before being resampled onto the panel. Much past 76 and the title runs out of viewport.
 
 ### Bird names

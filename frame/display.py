@@ -541,9 +541,13 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     if use_signature:
         try:
             species, anchor = fetch_species(cfg, _auth(cfg))
-            sig = signature(species,
-                            fresh_slugs(species, anchor, cfg["fresh_minutes"]),
-                            fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"]))
+            fresh = fresh_slugs(species, anchor, cfg["fresh_minutes"])
+            fading = fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"])
+            sig = signature(species, fresh, fading)
+            # What the renderer is about to draw, in the journal. Without this
+            # the only way to tell an outline that is off from one that simply
+            # has no bird to sit on is to go and look at the panel.
+            print(f"{len(species)} species, {len(fresh)} singing, {len(fading)} fading")
         except Exception as e:
             print(f"signature fetch failed: {e}", file=sys.stderr)  # treat as no change
     heal_due = now - state.get("last_refresh", 0) >= cfg["heal_hours"] * 3600
@@ -589,6 +593,29 @@ def load_config(path):
     return cfg
 
 
+def apply_overrides(cfg, pairs):
+    """`-o key=value`, for trying a setting on the panel before committing it to
+    config.toml. Nothing is written back.
+
+    Values are read as TOML, so 0.97, 30, true and "el133uf1" all mean what they
+    look like, and anything TOML cannot parse is taken as a bare string. An
+    unknown key is an error rather than a no-op: a typo that silently changes
+    nothing is the worst possible outcome when the thing you are checking is
+    whether a setting had any effect."""
+    for pair in pairs or ():
+        key, sep, raw = pair.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ValueError(f"--set wants KEY=VALUE, got {pair!r}")
+        if key not in DEFAULTS:
+            raise ValueError(f"unknown config key {key!r}")
+        try:
+            cfg[key] = tomllib.loads(f"v = {raw.strip()}")["v"]
+        except Exception:
+            cfg[key] = raw.strip()
+    return cfg
+
+
 def main():
     ap = argparse.ArgumentParser(description="Push the collage screenshot to the Inky panel.")
     ap.add_argument("--config")
@@ -600,6 +627,9 @@ def main():
     ap.add_argument("--force", action="store_true", help="refresh even if unchanged")
     ap.add_argument("--no-signature", action="store_true", help="skip change detection")
     ap.add_argument("--mat-box", action="store_true", help="dev: outline the mat window on the preview")
+    ap.add_argument("-o", "--set", dest="overrides", action="append", metavar="KEY=VALUE",
+                    help="override one config value for this run only, repeatable: "
+                         "-o fresh_minutes=0 -o opening=0.7071. Not written to config.toml.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -609,6 +639,11 @@ def main():
             cfg[key] = val
     if args.rotate is not None:
         cfg["rotate"] = args.rotate
+    try:
+        apply_overrides(cfg, args.overrides)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
     # One render at a time. A manual --force colliding with the timer's run
     # pushes two refreshes into the panel mid-cycle; on the 13.3" (two
     # half-panel controllers) that shows a split image and can wedge one

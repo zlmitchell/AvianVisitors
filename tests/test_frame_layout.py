@@ -366,3 +366,39 @@ def test_a_count_change_inside_one_bracket_moves_nothing():
     assert display.signature(a) == display.signature(b)
     crossed = species(("Melospiza melodia", 101, stamp(ANCHOR, 200)))
     assert display.signature(a) != display.signature(crossed)
+
+
+# --- per-run overrides ------------------------------------------------------
+@pytest.mark.parametrize("pair,key,expected", [
+    ("fresh_minutes=0", "fresh_minutes", 0),
+    ("opening=0.7071", "opening", 0.7071),
+    ("bird_names=false", "bird_names", False),
+    ("bird_names=true", "bird_names", True),
+    ('panel="el133uf1"', "panel", "el133uf1"),
+    ("panel=el133uf1", "panel", "el133uf1"),      # bare string, no TOML quotes
+    ("hours = 24", "hours", 24),                   # spaces around the =
+])
+def test_override_parses_the_value_as_written(pair, key, expected):
+    cfg = display.apply_overrides(dict(display.DEFAULTS), [pair])
+    assert cfg[key] == expected
+    assert type(cfg[key]) is type(expected)
+
+
+def test_overrides_are_repeatable_and_leave_the_rest_alone():
+    cfg = display.apply_overrides(dict(display.DEFAULTS),
+                                  ["fresh_minutes=0", "fade_hours=1", "hours=2"])
+    assert (cfg["fresh_minutes"], cfg["fade_hours"], cfg["hours"]) == (0, 1, 2)
+    assert cfg["opening"] == display.DEFAULTS["opening"]
+
+
+@pytest.mark.parametrize("bad", ["nonsense", "", "=5", "  =5"])
+def test_malformed_override_is_refused(bad):
+    with pytest.raises(ValueError):
+        display.apply_overrides(dict(display.DEFAULTS), [bad])
+
+
+def test_unknown_key_is_refused_rather_than_ignored():
+    """A typo that silently changes nothing is the worst outcome when the whole
+    point of the flag is checking whether a setting did anything."""
+    with pytest.raises(ValueError):
+        display.apply_overrides(dict(display.DEFAULTS), ["fresh_minute=0"])
