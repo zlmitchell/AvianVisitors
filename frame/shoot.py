@@ -181,7 +181,7 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, label_scale, au
                               (r"countExp:\s*[\d.]+,", f"countExp: {count_exp},"),
                               (r"var pad = narrow \? Math\.max\(1, COLLAGE_PAD - 1\) : COLLAGE_PAD;", f"var pad = {pad};"),
                               (r"var LABEL_MIN_PX = \d+;", f"var LABEL_MIN_PX = {int(label_min_px)};"),
-                              (r"var LABEL_SCALE = [\d.]+;", f"var LABEL_SCALE = {label_scale};")):
+                              (r"var MARK_SCALE = [\d.]+;", f"var MARK_SCALE = {label_scale};")):
                 js, n = re.subn(pat, repl, js)
                 if not n:
                     misses.append(pat)

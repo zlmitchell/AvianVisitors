@@ -684,15 +684,18 @@
   var LABEL_NEAR = 2;       // px of paper between silhouette and letters
   var LABEL_MIN_PX = 9;     // below this the handwriting stops reading
   var LABEL_MAX_PX = 21;
-  // Multiplies the type size a tile asks for. 1 on the website. The e-ink frame
-  // rewrites it at capture time: the collage is drawn here and then scaled onto
-  // the panel, so a larger mat opening - which scales it less - would enlarge
-  // every name along with the birds. The frame cancels that out so a name is
-  // the same physical size on the wall whatever is cut in front of the panel,
-  // and the room a larger opening buys goes to the drawings instead of to the
-  // lettering. The packer reserves the lettering's box, so smaller names also
-  // let the flock nest tighter.
-  var LABEL_SCALE = 1;
+  // Multiplies everything DRAWN ON the birds rather than being one - the type
+  // size a name asks for, and the weight of the still-singing outline. 1 on the
+  // website. The e-ink frame rewrites it at capture time: the collage is drawn
+  // here and then scaled onto the panel, so a larger mat opening - which scales
+  // it less - would enlarge every name and every stroke along with the birds.
+  // Cancelling that out keeps a mark the same physical size on the wall whatever
+  // is cut in front of the panel, and hands the room a larger opening buys to
+  // the drawings instead of to the marks on them. A name is legible or it is
+  // not, and an outline reads as a mark or as a sticker; neither judgement has
+  // anything to do with the mat. The packer reserves the lettering's box, so
+  // smaller names also let the flock nest tighter.
+  var MARK_SCALE = 1;
   var LABEL_ASC = 0.80;     // Caveat's inked em band, above the baseline
   var LABEL_DESC = 0.25;    // and below it
   // Most ink one letter-width of a name may sit on: a shade above nothing.
@@ -883,7 +886,7 @@
   // even sought. Keying on the longer side instead would let that same
   // heron take larger type than a dove twice its area.
   function labelCap(W, H) {
-    return Math.round(Math.min(LABEL_MAX_PX, Math.sqrt(W * H) * 0.16) * LABEL_SCALE);
+    return Math.round(Math.min(LABEL_MAX_PX, Math.sqrt(W * H) * 0.16) * MARK_SCALE);
   }
 
   // Trace the silhouette's outline in order (Moore boundary walk). A
@@ -961,7 +964,12 @@
   // Stroke weight as a share of the tile's geometric mean, floored so a
   // one-call bird's small tile still carries a line the e-ink dither can hold
   // (below about two device pixels Floyd-Steinberg breaks it into dashes).
-  var FRESH_STROKE = 0.022, FRESH_STROKE_MIN = 2;
+  // 0.016, down from the 0.022 this started at: that was judged on a plate whose
+  // collage was scaled to 0.44 on its way to the panel, and the default now
+  // scales to 0.61, which made the same number draw a sticker border rather
+  // than an outline. Both bounds go through MARK_SCALE with the type, so the
+  // weight is the same on the wall whatever the opening.
+  var FRESH_STROKE = 0.016, FRESH_STROKE_MIN = 2;
 
   function freshWindowMs() {
     var mins = freshParam ? +freshParam[1] : FRESH_MIN;
@@ -1057,7 +1065,7 @@
   }
 
   function freshStrokeWidth(t) {
-    return Math.max(FRESH_STROKE_MIN, Math.sqrt(t.fullW * t.fullH) * FRESH_STROKE);
+    return Math.max(FRESH_STROKE_MIN, Math.sqrt(t.fullW * t.fullH) * FRESH_STROKE) * MARK_SCALE;
   }
 
   // What makes an edge worth writing along, as one number in 0..1. Three
