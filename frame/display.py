@@ -100,7 +100,15 @@ DEFAULTS = {
     # collage_frac is a fraction of the opening's WIDTH, and stays that way:
     # the collage is the thing that is supposed to grow with the opening.
     "title_frac": 0.046,
-    "collage_frac": 0.66,
+    # 0.92, not the 0.66 this inherited. 0.66 inset the collage a further third
+    # inside an opening that already is the safe area, so a matted frame used
+    # about two thirds of its window's width and half its height - measured on
+    # the panel, 528x719 of an 800x1131 opening. Names made that visible: they
+    # go into the same collision grid as the birds, so with names on the flock
+    # has to find room for the lettering too, and inside a fixed envelope the
+    # birds are what gives. 0.92 pays for the names and then some (736x857) and
+    # still leaves 32px of paper each side inside the mat window.
+    "collage_frac": 0.92,
     "gap_frac": 0.071,
     # Type size for the bird names, as a multiplier on what the tile asks for.
     # 0 holds the handwriting at the physical size the A5 mat gives it, whatever
@@ -345,7 +353,7 @@ def _centroid_x(img, paper):
 # opening height. These are the shipped defaults; every one is a config key,
 # because a bare panel and an A5 mat want very different numbers and the whole
 # point of enlarging the opening is that the content grows with it.
-TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.046, 0.66, 0.071
+TITLE_H_FRAC, COLLAGE_FRAC, GAP_FRAC = 0.046, 0.92, 0.071
 
 # The collage scale factor the A5 mat produces. That is the layout apt.js's
 # handwriting sizes were chosen against, so it is what "the size the names have

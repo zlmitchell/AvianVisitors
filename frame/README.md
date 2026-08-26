@@ -79,7 +79,7 @@ A default install draws into the **A5 window of the A4 frame from the BOM** — 
 |-----|------------------|------------|
 | `opening` | `0.7071` | `0.97` |
 | `opening_aspect` | `0.7071` | `0.75` (the panel's own 1200x1600) |
-| `collage_frac` | `0.66` | `0.98` |
+| `collage_frac` | `0.92` | `0.98` |
 | `shoot_collage_vh` | `52` | `74` |
 | `hours` | `24` | `48` |
 

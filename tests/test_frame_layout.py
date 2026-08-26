@@ -521,3 +521,14 @@ def test_both_render_paths_get_the_same_look_settings():
     for name, kwargs in calls.items():
         missing = shared - kwargs
         assert not missing, f"{name}() is missing {sorted(missing)}"
+
+
+def test_the_collage_actually_fills_its_opening():
+    """The opening is already the safe area - the mat is cut to it - so
+    collage_frac is only an extra inset inside that. Left at the 0.66 this
+    inherited, a matted frame used two thirds of its window's width and half
+    its height, which names-on then made obvious by taking room from the birds."""
+    assert display.DEFAULTS["collage_frac"] >= 0.9
+    ow, oh = display.opening_size(display.DEFAULTS["opening"], display.DEFAULTS["opening_aspect"])
+    used = ow * display.DEFAULTS["collage_frac"]
+    assert used <= ow - 24, "leave some paper inside the mat window"

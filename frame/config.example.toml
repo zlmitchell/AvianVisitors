@@ -101,8 +101,10 @@ title_frac = 0.046
 gap_frac = 0.071
 
 # collage_frac is a share of the opening's WIDTH, and stays that way: the
-# collage is the thing that is meant to grow with the opening.
-collage_frac = 0.66
+# collage is the thing that is meant to grow with the opening. Lower it if the
+# birds crowd your mat; the opening is already the safe area, so this is only
+# an extra inset inside it.
+collage_frac = 0.92
 
 # Bird-name type size, as a multiplier on what the tile asks for. 0 holds the
 # handwriting at the physical size the A5 mat gives it whatever the opening, by
