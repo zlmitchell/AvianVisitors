@@ -970,6 +970,11 @@
   // than an outline. Both bounds go through MARK_SCALE with the type, so the
   // weight is the same on the wall whatever the opening.
   var FRESH_STROKE = 0.016, FRESH_STROKE_MIN = 2;
+  // Paper between the silhouette and the first line, and between the two lines,
+  // both in stroke widths so the whole mark scales as one thing. Two concentric
+  // rules rather than one: a single line off the bird can read as a stray
+  // contour of the drawing, where a pair reads as something added on purpose.
+  var FRESH_GAP = 1.6, FRESH_RULES = 2, FRESH_RULE_GAP = 1.9;
 
   function freshWindowMs() {
     var mins = freshParam ? +freshParam[1] : FRESH_MIN;
@@ -1050,16 +1055,41 @@
     return Math.min(FADE_STEPS, Math.ceil(through * FADE_STEPS));
   }
 
-  // The silhouette's own boundary as one closed path in tile pixels. Returns
-  // '' for a shape outline() could not trace (too few boundary cells), which
-  // leaves that bird unstroked rather than boxed - a rectangle round a bird
-  // would read as a different statement than the outline does.
-  function freshPath(t) {
+  // The silhouette's own boundary, pushed OUT into the paper by `gap` tile
+  // pixels, as one closed path. Offset rather than traced on the edge because a
+  // line lying along the drawing competes with it: a red outline on a red
+  // cardinal all but vanished, while the same line on a blue jay read cleanly.
+  // Standing the mark off the bird makes it legible against any plumage, and
+  // black then costs nothing that a colour was buying.
+  //
+  // The outward direction is found per point rather than from the winding,
+  // which outline() does not fix, or from the centroid, which is wrong for
+  // every concave shape a bird has - between the legs, under the tail. The
+  // normal is taken from the local tangent and then disambiguated by probing:
+  // whichever side is not ink is out. A large enough gap will still cross
+  // itself in a deep notch, which is why the gaps below are small multiples of
+  // the stroke rather than free numbers.
+  //
+  // Returns '' for a shape outline() could not trace, which leaves that bird
+  // unmarked rather than boxed.
+  function freshPath(t, gap) {
     var out = outline(t.slug, t.mask);
-    if (!out || !out.pts || out.pts.length < 2) return '';
-    var sx = t.fullW / out.w, sy = t.fullH / out.h, d = [], i;
-    for (i = 0; i < out.pts.length; i++) {
-      d.push((i ? 'L' : 'M') + (out.pts[i][0] * sx).toFixed(1) + ' ' + (out.pts[i][1] * sy).toFixed(1));
+    if (!out || !out.pts || out.pts.length < 8) return '';
+    var sx = t.fullW / out.w, sy = t.fullH / out.h;
+    var pts = out.pts, n = pts.length;
+    var arm = Math.max(2, Math.round(n * 0.012)), d = [], i;
+    for (i = 0; i < n; i++) {
+      var p = pts[i], a = pts[(i - arm + n) % n], b = pts[(i + arm) % n];
+      var tx = (b[0] - a[0]) * sx, ty = (b[1] - a[1]) * sy;
+      var len = Math.hypot(tx, ty) || 1;
+      var nx = ty / len, ny = -tx / len;
+      // Probe a step along the normal in mask space; if that lands in ink this
+      // is the inward side, so take the other one.
+      if (out.at(Math.round(p[0] + (nx / sx) * 1.5), Math.round(p[1] + (ny / sy) * 1.5))) {
+        nx = -nx; ny = -ny;
+      }
+      d.push((i ? 'L' : 'M') + (p[0] * sx + nx * gap).toFixed(1) +
+             ' ' + (p[1] * sy + ny * gap).toFixed(1));
     }
     return d.join(' ') + ' Z';
   }
@@ -2458,16 +2488,19 @@
       // Inserted before the name so the lettering stays the topmost ink on the
       // tile - the stroke marks the bird, it does not compete with reading it.
       if (isFresh(s, freshCut)) {
-        var fd = freshPath(r);
-        if (fd) {
+        var fw = freshStrokeWidth(r), rules = [], ri;
+        for (ri = 0; ri < FRESH_RULES; ri++) {
+          var fd = freshPath(r, fw * (FRESH_GAP + ri * FRESH_RULE_GAP));
+          if (fd) rules.push('<path d="' + fd + '" stroke-width="' + fw.toFixed(2) + '"/>');
+        }
+        if (rules.length) {
           // The stroke is the sighted reader's cue; the title carries the same
           // fact for a screen reader and for the keyboard path, which is the
           // only place the count and window already live.
           btn.title += ' - singing now';
           btn.insertAdjacentHTML('beforeend',
             '<svg class="gtile-fresh" aria-hidden="true" viewBox="0 0 ' +
-            r.fullW.toFixed(1) + ' ' + r.fullH.toFixed(1) + '">' +
-            '<path d="' + fd + '" stroke-width="' + freshStrokeWidth(r).toFixed(2) + '"/></svg>');
+            r.fullW.toFixed(1) + ' ' + r.fullH.toFixed(1) + '">' + rules.join('') + '</svg>');
         }
       }
       if (r.labelRows) {

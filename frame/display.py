@@ -100,6 +100,10 @@ DEFAULTS = {
     # collage_frac is a fraction of the opening's WIDTH, and stays that way:
     # the collage is the thing that is supposed to grow with the opening.
     "title_frac": 0.046,
+    # "top" or "bottom": which end of the opening the title sits at. The source
+    # screenshot always has it on top - that is how the splitter finds it - so
+    # this only changes how the two crops are stacked back up.
+    "title_position": "top",
     # 0.92, not the 0.66 this inherited. 0.66 inset the collage a further third
     # inside an opening that already is the safe area, so a matted frame used
     # about two thirds of its window's width and half its height - measured on
@@ -294,6 +298,15 @@ def _frac(value, name, hi=1.0):
     return value
 
 
+def _title_position(value):
+    """"top" or "bottom", validated. A typo here would silently keep the title
+    where it was, which is indistinguishable from the setting not existing."""
+    text = str(value or "top").strip().lower()
+    if text not in ("top", "bottom"):
+        raise ValueError('title_position must be "top" or "bottom"')
+    return text
+
+
 # The opening is the rectangle the content is fitted into, centred in the
 # panel. `opening` is its height as a fraction of the panel and `aspect` is its
 # width over its height, so the two together describe a bare panel (0.97 and
@@ -369,6 +382,7 @@ def layout_of(cfg):
         "title": _frac(cfg.get("title_frac", TITLE_H_FRAC), "title_frac"),
         "collage": _frac(cfg.get("collage_frac", COLLAGE_FRAC), "collage_frac"),
         "gap": _frac(cfg.get("gap_frac", GAP_FRAC), "gap_frac"),
+        "title_position": _title_position(cfg.get("title_position", "top")),
     }
 
 
@@ -417,7 +431,8 @@ def label_scale(cfg):
 
 
 def mat_and_center(img, mat, opening, aspect=0.75,
-                   title_frac=TITLE_H_FRAC, collage_frac=COLLAGE_FRAC, gap_frac=GAP_FRAC):
+                   title_frac=TITLE_H_FRAC, collage_frac=COLLAGE_FRAC, gap_frac=GAP_FRAC,
+                   title_position="top"):
     """Crop the title and collage, size each to a fraction of the opening,
     stack with a gap, and centre on the panel."""
     img = img.convert("RGB")
@@ -472,8 +487,12 @@ def mat_and_center(img, mat, opening, aspect=0.75,
         half = max(ccx, collage.width - ccx)
     cw = round(max(title.width, 2 * half))
     comp = Image.new("RGB", (cw, title.height + gap + collage.height), paper)
-    comp.paste(title, ((cw - title.width) // 2, 0))
-    comp.paste(collage, (round(cw / 2 - ccx), title.height + gap))
+    if title_position == "bottom":
+        comp.paste(collage, (round(cw / 2 - ccx), 0))
+        comp.paste(title, ((cw - title.width) // 2, collage.height + gap))
+    else:
+        comp.paste(title, ((cw - title.width) // 2, 0))
+        comp.paste(collage, (round(cw / 2 - ccx), title.height + gap))
     canvas = Image.new("RGB", (PANEL_W, PANEL_H), paper)
     canvas.paste(comp, ((PANEL_W - comp.width) // 2, (PANEL_H - comp.height) // 2))
     return canvas
@@ -645,7 +664,7 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
         return
     lay = layout_of(cfg)
     img = mat_and_center(img, lay["mat"], lay["opening"], lay["aspect"],
-                         lay["title"], lay["collage"], lay["gap"])
+                         lay["title"], lay["collage"], lay["gap"], lay["title_position"])
     if preview:
         out = quantize_spectra6(img)
         if mat_box:

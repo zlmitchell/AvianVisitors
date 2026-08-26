@@ -8,10 +8,10 @@
     --ink-soft: #908576;
     --accent:   #4a3f31;   /* warm dark grey - matches ink-2, no longer red */
     --accent-2: #1a1612;   /* near-black ink - same hue as the title text */
-    /* Outline on a bird heard in the last half hour. Deliberately the
-       Spectra 6 red, so the e-ink frame draws this mark in one of the
-       panel's own inks and never has to dither it into a mottle. */
-    --fresh-ink: #a53c38;
+    /* The still-singing outline. Black, not the Spectra red it started as: the
+       mark has to read on any plumage, and red on a cardinal all but vanished.
+       Black is one of the panel's own inks too, so it never dithers. */
+    --fresh-ink: #1a1612;
     --hairline: rgba(26,22,18,0.14);  /* faint divider lines + chart gridlines */
     --pill:     #fcfcfb;              /* active-toggle sliding pill */
     /* Depth shadow recipes - replace flat 1px borders */
@@ -37,7 +37,7 @@
     --ink-soft: #837c70;   /* muted text */
     --accent:   #d8d2c6;   /* light warm - pills read light-on-dark */
     --accent-2: #ece8e1;
-    --fresh-ink: #d9776d;  /* the fresh outline, lifted to carry on charcoal */
+    --fresh-ink: #ece8e1;  /* the outline, inverted to carry on charcoal */
     --hairline: rgba(236,232,225,0.20);  /* faint light divider on charcoal */
     --pill:     #3a3e48;                 /* raised, clearly lighter than the track */
     --edge:    inset 0 0 0 1px rgba(255,255,255,0.05), 0 0 0 1px rgba(0,0,0,0.4);
@@ -3379,7 +3379,7 @@ body.av-local #dd-items  { display: block; }
    Grey runs ahead of weight. Colour is the first thing a bird loses, because
    losing it says "a while ago" without yet saying "nearly gone"; opacity only
    really opens up over the last two steps, which is where the plate should
-   start to look like it is letting go. The last step stops at 0.42 rather than
+   start to look like it is letting go. The last step stops at 0.55 rather than
    fading to nothing: a bird still inside the window is still a bird that was
    heard, and the e-ink dither needs something left to stipple.
 
@@ -3387,11 +3387,11 @@ body.av-local #dd-items  { display: block; }
    comment in apt.js. Transitions are off: on the website these only ever change
    between renders, and on the frame there is nothing to animate. */
 .gtile[data-fade] { transition: none; }
-.gtile[data-fade="1"] { filter: grayscale(0.35); opacity: 0.90; }
-.gtile[data-fade="2"] { filter: grayscale(0.60); opacity: 0.78; }
-.gtile[data-fade="3"] { filter: grayscale(0.80); opacity: 0.66; }
-.gtile[data-fade="4"] { filter: grayscale(0.92); opacity: 0.54; }
-.gtile[data-fade="5"] { filter: grayscale(1);    opacity: 0.42; }
+.gtile[data-fade="1"] { filter: grayscale(0.35); opacity: 0.91; }
+.gtile[data-fade="2"] { filter: grayscale(0.60); opacity: 0.82; }
+.gtile[data-fade="3"] { filter: grayscale(0.80); opacity: 0.73; }
+.gtile[data-fade="4"] { filter: grayscale(0.92); opacity: 0.64; }
+.gtile[data-fade="5"] { filter: grayscale(1);    opacity: 0.55; }
 /* Hovering a quiet bird brings it back, so the pill and the cutout can be read
    at full strength without waiting for the bird to sing again. */
 .gtile[data-fade].is-hover { filter: none; opacity: 1; }

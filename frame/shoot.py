@@ -68,10 +68,10 @@ def _frame_css(headline_px, eyebrow_px, lowercase, pad_top, pad_side, pad_bottom
         f".static-head h1 {{ font-size: {headline_px}px !important; }}"
         ".gtile-label text { fill: #000 !important; filter: none !important;"
         " font-weight: 400 !important; }"
-        # The fresh outline is pinned to the Spectra 6 red rather than left to
-        # the page's own variable, so the panel lays the mark down in one of its
-        # six inks and the dither never has to mottle it into a broken line.
-        " .gtile-fresh path { stroke: #a53c38 !important; }"
+        # The still-singing outline is pinned to solid black rather than left
+        # to the page's own variable, so the panel lays it down in one of its
+        # six inks and the dither never mottles it into a broken line.
+        " .gtile-fresh path { stroke: #000 !important; }"
         ".empty-nest .empty { font-size: 18px !important; font-weight: 650 !important;"
         " letter-spacing: 0.12em !important; color: #242424 !important; }"
     )

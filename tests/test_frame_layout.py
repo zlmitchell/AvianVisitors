@@ -541,3 +541,39 @@ def test_the_name_reference_tracks_the_shipped_default():
     collage_frac did before this was derived."""
     assert display.reference_scale() == pytest.approx(display.collage_scale(display.DEFAULTS))
     assert display.label_scale(dict(display.DEFAULTS)) == pytest.approx(1.0)
+
+
+# --- which end the title sits at --------------------------------------------
+def test_title_can_sit_at_either_end():
+    shot = fake_shot()
+    top = display.mat_and_center(shot, 0.0, 0.7071, 0.7071, 0.046, 0.92, 0.071, "top")
+    bottom = display.mat_and_center(shot, 0.0, 0.7071, 0.7071, 0.046, 0.92, 0.071, "bottom")
+    # the two must differ, and both must still fit the opening
+    assert list(top.getdata()) != list(bottom.getdata())
+    for out in (top, bottom):
+        box = ink_bbox(out)
+        assert box[0] >= 0 and box[2] <= display.PANEL_W
+        assert box[1] >= 0 and box[3] <= display.PANEL_H
+    # The fake shot's title band is 180px and its collage block 900px, so which
+    # end the thin band lands at is the whole difference: compare the ink in the
+    # top eighth of the composed panel.
+    def top_ink(img):
+        d = ImageChops.difference(img, Image.new("RGB", img.size, display._paper(img)))
+        rows = list(d.convert("L").point(lambda p: 255 if p > 34 else 0)
+                    .resize((1, img.height), Image.BOX).tobytes())
+        band = ink_bbox(img)[1]
+        return sum(rows[band:band + 200])
+    assert top_ink(top) < top_ink(bottom), "the collage should lead when the title is at the bottom"
+
+
+def test_title_position_is_validated():
+    for bad in ("middle", "TOP-ish", "", None, 3):
+        if bad in ("", None):
+            assert display._title_position(bad) == "top"   # unset means the default
+            continue
+        with pytest.raises(ValueError):
+            display._title_position(bad)
+    assert display._title_position("TOP") == "top"
+    assert display._title_position(" Bottom ") == "bottom"
+    with pytest.raises(ValueError):
+        display.layout_of({**display.DEFAULTS, "title_position": "sideways"})
