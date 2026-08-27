@@ -306,7 +306,7 @@ def fake_curses(keys):
              "KEY_ENTER", "KEY_RESIZE", "KEY_BACKSPACE"]
     for number, name in enumerate(names, start=1000):
         setattr(module, name, number)
-    module.A_NORMAL, module.A_BOLD, module.A_REVERSE = 0, 1, 2
+    module.A_NORMAL, module.A_BOLD, module.A_REVERSE, module.A_DIM = 0, 1, 2, 4
     module.COLOR_BLACK, module.COLOR_CYAN, module.COLOR_YELLOW = 0, 6, 3
     module.curs_set = lambda visible: None
     module.start_color = lambda: None
@@ -632,13 +632,13 @@ def test_a_summary_still_reads_as_a_config_line():
     assert tui.written_value("basic_pass", "hunter2") == "set"
 
 
-def test_the_matboard_row_is_the_first_thing_on_the_screen(editor):
-    """It was buried in the panel section, which put it off the bottom of an
-    80x24 ssh window with nothing on screen saying so - indistinguishable from
-    it not existing."""
-    first_field = next(i for i, (shape, _) in enumerate(editor.rows) if shape != "header")
-    assert editor.rows[first_field] == ("preset", "layout")
-    assert editor.index == first_field
+def test_the_two_deciding_rows_lead_the_screen(editor):
+    """The matboard was buried in the panel section, off the bottom of an 80x24
+    ssh window with nothing saying so - indistinguishable from not existing.
+    Both it and the source decide other rows, so both come first."""
+    fields = [i for i, (shape, _) in enumerate(editor.rows) if shape != "header"]
+    assert [editor.rows[i] for i in fields[:2]] == [("source", "source"), ("preset", "layout")]
+    assert editor.index == fields[0]
 
 
 def test_a_short_terminal_says_how_many_settings_there_are(monkeypatch, editor):
@@ -650,7 +650,7 @@ def test_a_short_terminal_says_how_many_settings_there_are(monkeypatch, editor):
     screen.addnstr = lambda y, x, text, n: written.append((y, text))
     monkeypatch.setitem(sys.modules, "curses", module)
     tui.run_screen(screen, editor)
-    total = sum(len(keys) for _, keys in tui.sections()) + 1   # + the matboard row
+    total = sum(len(keys) for _, keys in tui.sections()) + 2   # + source and matboard
     assert any(f"1/{total}" in text for _, text in written)
 
 
@@ -678,3 +678,72 @@ def test_what_is_shown_is_what_comes_back_to_edit(key, value):
     """Round trip: the number offered in the prompt parses back to the value
     the row was showing."""
     assert tui.parse_value(key, tui.edit_text(value, key)) == value
+
+
+# --- a setting that is quietly overridden ------------------------------------
+# obtain_image checks species_source, then shoot, then image_url, returning at
+# the first match. So image_url set while species_source is "birdweather" does
+# nothing whatsoever - and the screen used to show the two as unrelated rows.
+def test_the_source_is_one_choice_not_three_rows(editor):
+    rows = [row for row in editor.rows if row[0] in ("source", "preset")]
+    assert rows[0] == ("source", "source"), "the source should lead the screen"
+    first_field = next(i for i, (shape, _) in enumerate(editor.rows) if shape != "header")
+    assert editor.rows[first_field][0] == "source"
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("local", {"species_source": "", "shoot": True}),
+    ("birdweather", {"species_source": "birdweather", "shoot": True}),
+    ("image", {"species_source": "", "shoot": False}),
+])
+def test_each_source_sets_both_keys_that_decide_it(mode, expected):
+    changes = next(c for name, _, c in tui.SOURCES if name == mode)
+    assert changes == expected
+    assert tui.mode_of(dict(display.DEFAULTS, **changes,
+                            image_url="https://x/f.png")) == mode
+
+
+def test_cycling_the_source_row_moves_species_source_and_shoot(monkeypatch, editor):
+    keys = fake_curses([])
+    start = tui.mode_of(editor.values)
+    drive(monkeypatch, editor, [keys.KEY_RIGHT, ord("q"), ord("y")],
+          at=next(i for i, (s, _) in enumerate(editor.rows) if s == "source"))
+    assert tui.mode_of(editor.values) != start
+    assert set(editor.changes) <= {"species_source", "shoot"}
+
+
+def test_image_url_is_flagged_while_birdweather_wins():
+    """The exact trap: you set the URL, the panel does not change, and nothing
+    anywhere tells you the birds are still coming from BirdWeather."""
+    values = dict(display.DEFAULTS, species_source="birdweather", zip="13037")
+    assert "BirdWeather" in tui.shadow_reason("image_url", values)
+    assert "BirdWeather" in tui.shadow_reason("base_url", values)
+
+
+def test_the_outline_and_fade_are_flagged_as_impossible_on_birdweather():
+    """BirdWeather carries no per-species last_seen, so fresh_slugs and
+    fade_steps both come back empty - the settings cannot do anything."""
+    values = dict(display.DEFAULTS, species_source="birdweather", zip="13037")
+    for key in ("fresh_minutes", "fade_hours"):
+        assert tui.shadow_reason(key, values), f"{key} should be flagged"
+    # And the renderer agrees: no anchor, so nothing is ever outlined.
+    assert display.fresh_slugs([{"sci": "Turdus migratorius"}], None, 30) == frozenset()
+
+
+def test_a_fade_with_no_ramp_is_flagged():
+    """fade_hours == hours is the shipped default and means nothing fades.
+    display.fade_param returns "0" for it, which is invisible from the screen."""
+    flat = dict(display.DEFAULTS, species_source="", fade_hours=24, hours=24)
+    assert tui.shadow_reason("fade_hours", flat)
+    assert display.fade_param(flat) == "0"
+
+    ramped = dict(flat, fade_hours=12)
+    assert tui.shadow_reason("fade_hours", ramped) is None
+    assert display.fade_param(ramped) == "12-24"
+
+
+def test_settings_that_are_doing_something_are_not_flagged():
+    """A warning on every row is the same as no warnings."""
+    live = dict(display.DEFAULTS, species_source="", shoot=True, fade_hours=12, hours=24)
+    for key in ("base_url", "hours", "bird_names", "rotate", "shoot_title", "fresh_minutes"):
+        assert tui.shadow_reason(key, live) is None, key

@@ -84,9 +84,9 @@ CHOICES = {
 }
 
 HELP = {
-    "species_source": 'blank = the recent API at base_url; "birdweather" = top birds near a ZIP, no mic',
+    "species_source": 'what the "birds come from" row at the top writes: blank = the recent API at base_url, "birdweather" = top birds near a ZIP',
     "base_url": "the BirdNET-Pi this frame mirrors",
-    "shoot": "render the collage on this Pi (needs the browser install.sh puts in)",
+    "shoot": 'the other half of "birds come from": render the collage on this Pi, which needs the browser install.sh puts in',
     "image": "read a PNG a sibling process drops here, instead of rendering",
     "image_url": "or fetch a ready-made frame PNG from here",
     "zip": "postal code BirdWeather mode reads its birds near",
@@ -159,7 +159,7 @@ PRESETS = [
 # row - but it is not what someone is looking for when they want to turn the
 # names off. Anything unlisted falls back to its key with the underscores out.
 LABELS = {
-    "species_source": "birds come from", "base_url": "bird mic address",
+    "species_source": "species feed", "base_url": "bird mic address",
     "shoot": "draw the collage here", "image": "read a PNG from",
     "image_url": "fetch a PNG from", "zip": "ZIP / postal code",
     "bw_days": "BirdWeather lookback", "bw_country": "country for the ZIP",
@@ -201,6 +201,58 @@ UNITS = {"hours": "h", "fade_hours": "h", "heal_hours": "h",
 
 def label_of(key):
     return LABELS.get(key, key.replace("_", " "))
+
+
+# Where the birds come from, as one choice. obtain_image() checks
+# species_source first and returns, then shoot, then image_url - so setting
+# image_url while species_source is "birdweather" changes nothing at all, and
+# the screen used to offer those as three unrelated rows with no hint of it.
+SOURCES = [
+    ("local", "this Pi's mic - the BirdNET-Pi at the address below",
+     {"species_source": "", "shoot": True}),
+    ("birdweather", "BirdWeather near a ZIP - no mic anywhere",
+     {"species_source": "birdweather", "shoot": True}),
+    ("image", "a ready-made PNG - drawn somewhere else",
+     {"species_source": "", "shoot": False}),
+]
+
+
+def source_label(values):
+    mode = mode_of(values)
+    return next((label for name, label, _ in SOURCES if name == mode), mode)
+
+
+def shadow_reason(key, values):
+    """Why this setting is doing nothing right now, or None.
+
+    A setting that is quietly overridden by another one is the worst thing a
+    config screen can hide: you change it, nothing happens, and there is
+    nowhere to look. Everything here is a rule obtain_image() or the renderer
+    already enforces - this only says so out loud."""
+    source = mode_of(values)
+    if key in ("zip", "bw_days", "bw_country") and source != "birdweather":
+        return "only read when the birds come from BirdWeather"
+    if key in ("image_url", "image") and source != "image":
+        return ("never reached: the birds come from BirdWeather"
+                if source == "birdweather" else
+                "never reached: the collage is drawn on this Pi")
+    if key == "base_url" and source == "birdweather":
+        return "not read: BirdWeather is fetched instead"
+    if key.startswith("shoot_") and source == "image":
+        return "the render happens elsewhere, so this is that renderer's job"
+    # BirdWeather has no per-species last_seen, so there is nothing to date a
+    # bird by - fresh_slugs and fade_steps both come back empty there.
+    if key in ("fresh_minutes", "fade_hours") and source == "birdweather":
+        return "BirdWeather gives no per-bird times, so nothing is outlined or faded"
+    if key == "fresh_minutes" and not values.get(key):
+        return "0 - no bird is outlined"
+    if key == "fade_hours":
+        window = values.get("hours") or 0
+        if not values.get(key):
+            return "0 - nothing fades"
+        if values.get(key) >= window:
+            return f"no fade: this has to be below the window ({window} h) to leave a ramp"
+    return None
 
 
 def sections(defaults=None):
@@ -612,7 +664,8 @@ def build_rows():
     open this screen to make and it decides five other rows, and buried in the
     panel section it sat off the bottom of an 80x24 ssh window - which looked
     exactly like it not being there."""
-    rows = [("header", "Matboard - the one that moves the rest"), ("preset", "layout")]
+    rows = [("header", "Start here - these two decide other rows"),
+            ("source", "source"), ("preset", "layout")]
     for title, keys in sections():
         rows.append(("header", title))
         rows.extend(("field", key) for key in keys)
@@ -650,6 +703,14 @@ class Editor:
             self.values[key] = options[(position + step) % len(options)]
             return True
         return False
+
+    def cycle_source(self, step):
+        names = [name for name, _, _ in SOURCES]
+        current = mode_of(self.values)
+        position = names.index(current) if current in names else -1
+        name, label, changes = SOURCES[(position + step) % len(SOURCES)]
+        self.values.update(changes)
+        self.message = f"birds come from: {label}"
 
     def cycle_preset(self, step):
         names = [name for name, _ in PRESETS]
@@ -707,7 +768,9 @@ def _draw(stdscr, editor, palette):
             stdscr.attroff(palette["section"])
             continue
         selected = position == editor.index
-        if shape == "preset":
+        if shape == "source":
+            label, text, mark = "birds come from", source_label(editor.values), " "
+        elif shape == "preset":
             label = "matboard"
             text = preset_name(editor.values) or "custom"
             mark = " "
@@ -715,16 +778,22 @@ def _draw(stdscr, editor, palette):
             label = label_of(key)
             text = show_value(editor.values.get(key), key)
             mark = "*" if key in changes else " "
+        reason = shadow_reason(key, editor.values) if shape == "field" else None
         attr = palette["selected"] if selected else (
-            palette["changed"] if mark == "*" else curses.A_NORMAL)
+            palette["changed"] if mark == "*"
+            else curses.A_DIM if reason else curses.A_NORMAL)
         line = f" {mark} {label:<26} {text}"
         stdscr.attron(attr)
         stdscr.addnstr(y, 0, line.ljust(width)[:width], width)
         stdscr.attroff(attr)
 
     shape, key = editor.rows[editor.index]
-    if shape == "preset":
+    if shape == "source":
+        note = "species_source + shoot together - the two that decide the rest"
+    elif shape == "preset":
         note = "sets opening, shape, fill, detail and window together"
+    elif shadow_reason(key, editor.values):
+        note = f"{key} - DOING NOTHING: {shadow_reason(key, editor.values)}"
     else:
         # The TOML key leads the help line: it is what config.toml and the
         # README call this, and the row above no longer says it.
@@ -852,7 +921,9 @@ def run_screen(stdscr, editor):
                 _move(editor, -1)
         elif ch in (curses.KEY_RIGHT, curses.KEY_LEFT, ord(" "), 10, 13, curses.KEY_ENTER):
             step = -1 if ch == curses.KEY_LEFT else 1
-            if shape == "preset":
+            if shape == "source":
+                editor.cycle_source(step)
+            elif shape == "preset":
                 editor.cycle_preset(step)
             elif not editor.cycle(key, step):
                 if ch in (curses.KEY_RIGHT, curses.KEY_LEFT):

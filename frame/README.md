@@ -96,8 +96,16 @@ Three things it does that hand-editing does not:
 
 - **The matboard row.** First row on the screen. The five keys in the table below
   move as one choice, not as five edits that are only correct together.
-- **Switching source after install** — `birdnet.local`, BirdWeather, or a
-  ready-made PNG. `install.sh` refuses to do this to an existing config.
+- **The `birds come from` row.** Second row on the screen: your own mic,
+  BirdWeather near a ZIP, or a ready-made PNG. `install.sh` refuses to switch an
+  existing config; this does. It writes `species_source` *and* `shoot` together,
+  because `obtain_image` tests them in that order and returns at the first match
+  — so setting `image_url` on its own, while `species_source` is `birdweather`,
+  does nothing at all.
+- **It says when a setting is doing nothing.** Any row currently overridden by
+  another is dimmed, and selecting it says why: `image_url` while BirdWeather
+  wins, `zip` when the birds come from your mic, or `fade_hours` when it is not
+  below `hours` and so leaves no ramp to fade over.
 - **The refresh.** Otherwise the panel keeps the picture it has until a bird
   changes, which from across the room looks exactly like the setting not working.
 
@@ -193,7 +201,9 @@ Spectra 6 has six inks and nothing between them, so there is no grey to fade thr
 
 Five steps rather than a gradient, and for the same reason the singing mark is an outline rather than a clock — no partial refresh, so anything continuous would redraw the whole panel to move one bird a shade paler. Each step is folded into the change signature, so the panel redraws when a bird visibly dims and not otherwise. The 15-minute timer caps the day at 96 redraws whatever happens.
 
-`fade_hours = 0` turns fading off. Setting `hours = 24` also turns it off, because there is then no tail to fade over.
+`fade_hours = 0` turns fading off. Setting `hours = 24` also turns it off, because there is then no tail to fade over. And like the singing outline, **it needs a mic**: the fade dates each bird from the `last_seen` the recent API returns, which BirdWeather does not report — so nothing fades in `--bird-weather` mode either. `birdframe` dims all three of those rows and says which one is stopping it.
+
+You do not have to widen the window to switch it on. Lowering `fade_hours` below `hours` gives the same ramp at no cost in tile size — `fade_hours = 12` with `hours = 24` fades a bird over the back half of the day, and leaves every bird exactly the size it is now.
 
 **Why the window is tied to the opening.** Tile areas are shares of one budget, so twice the birds is roughly half the area each — and `apt.js`'s tuning table steps the budget down again past 12 and 24 species. Measured on a plausible day's counts, median tile on the panel:
 
