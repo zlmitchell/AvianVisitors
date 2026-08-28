@@ -227,6 +227,40 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, label_scale, au
     return handler
 
 
+# What the browser is told, and why each one is worth a line.
+#
+# The frame renders one static page and photographs it. Chromium is built to
+# keep many tabs of live content responsive, and most of what it spends memory
+# on serves that and not this. On a Pi 3 A+ the render's own slice measured
+# 220-240MB against a 415MB machine that is already holding a BirdNET station,
+# so the overflow goes to zram and then to an SD card - which is the difference
+# between a render that takes a minute and one that takes twenty.
+#
+# srgb            the panel's dither expects sRGB, not the display's profile.
+# dev-shm-usage   /dev/shm is tiny in a container and on a Pi; without this
+#                 chromium tries to use it for shared memory and falls over.
+# gpu +           there is no GPU. Playwright's default turns on SwiftShader, a
+# software-        software GL rasteriser, which costs a process and its memory
+# rasterizer      to emulate hardware that would not be used.
+# renderer-limit  one page, so one renderer. The default pool is sized for tabs.
+# max-old-space   caps V8's heap. The collage's own working set is a few MB of
+#                 masks and tiles; left uncapped V8 sizes its heap against the
+#                 machine and grows into memory the station needs.
+# extensions,     none are installed and none are wanted; each is startup work
+# background-*    and resident memory for a page that lives for one screenshot.
+CHROMIUM_ARGS = [
+    "--force-color-profile=srgb",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--renderer-process-limit=1",
+    "--js-flags=--max-old-space-size=96",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-sync",
+]
+
+
 def _record_resources(page, m):
     """Copy the browser's resource-timing buffer into the metrics log.
 
@@ -305,7 +339,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
 
     with sync_playwright() as p:
         mark("playwright.driver")
-        browser = p.chromium.launch(args=["--force-color-profile=srgb", "--disable-dev-shm-usage"])
+        browser = p.chromium.launch(args=CHROMIUM_ARGS)
         mark("browser.launch")
         try:
             ctx_kw = {
