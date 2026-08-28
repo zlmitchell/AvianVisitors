@@ -18,6 +18,13 @@ ImageChops = pytest.importorskip("PIL.ImageChops", reason="Pillow is not install
 
 FRAME = Path(__file__).resolve().parents[1] / "frame"
 
+# display.py and shoot.py are scripts that sit beside their own imports, so when
+# they run for real Python has already put frame/ on sys.path as the script's
+# directory. Loading them by path here does not, so do it explicitly - otherwise
+# `import metrics` inside display.py fails in the tests and nowhere else.
+if str(FRAME) not in sys.path:
+    sys.path.insert(0, str(FRAME))
+
 
 def load_display():
     """Import frame/display.py by path. It is a script beside its siblings, not

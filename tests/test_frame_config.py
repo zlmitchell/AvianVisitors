@@ -21,6 +21,12 @@ pytest.importorskip("PIL.Image", reason="Pillow is not installed")
 
 FRAME = Path(__file__).resolve().parents[1] / "frame"
 
+# These are scripts that sit beside their own imports, so running them for real
+# puts frame/ on sys.path as the script's directory. Loading them by path does
+# not, so display.py's `import metrics` would fail here and nowhere else.
+if str(FRAME) not in sys.path:
+    sys.path.insert(0, str(FRAME))
+
 
 def load(name, filename):
     """Import a script from frame/ by path, the way test_frame_layout does."""

@@ -23,6 +23,8 @@ import statistics
 import sys
 import time
 import urllib.request
+
+import metrics
 from datetime import datetime, timedelta
 
 from PIL import Image, ImageChops, ImageDraw
@@ -118,7 +120,7 @@ DEFAULTS = {
     # 0 holds the handwriting at the physical size the A5 mat gives it, whatever
     # the opening, by cancelling out the collage's own scale-up - see
     # label_scale(). A positive value overrides that outright.
-    "label_scale": 0,
+    "label_scale": 0,
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
@@ -601,7 +603,7 @@ def frame_url(url, bird_names, fresh_minutes=None, fade=None):
 
 
 # --- run --------------------------------------------------------------------
-def obtain_image(cfg, species=None):
+def obtain_image(cfg, species=None, m=None):
     if cfg.get("species_source") == "birdweather":
         from shoot import shoot_birdweather
         if species is None:  # gate skipped (--no-signature): fetch the list to render
@@ -610,7 +612,8 @@ def obtain_image(cfg, species=None):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         shoot_birdweather(out, species, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
                           timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"],
-                          collage_vh=cfg["shoot_collage_vh"], label_scale=label_scale(cfg))
+                          collage_vh=cfg["shoot_collage_vh"], label_scale=label_scale(cfg),
+                          metrics=m)
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
         from shoot import shoot
@@ -623,7 +626,7 @@ def obtain_image(cfg, species=None):
               user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
               bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
               fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
-              label_scale=label_scale(cfg))
+              label_scale=label_scale(cfg), metrics=m)
         return Image.open(out).convert("RGB")
     src = cfg["image_url"] or cfg["image"]
     if not src:
@@ -640,6 +643,12 @@ def obtain_image(cfg, species=None):
 
 def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     now = time.time()
+    # Env var, not a config key. Writing a timing log is a diagnostic, not a
+    # setting: it belongs to one run on the machine that is misbehaving, not in
+    # the settings screen beside the mat size. This branch has already had to
+    # take one command back out of that file for exactly this reason, so it is
+    # BIRDFRAME_METRICS=/tmp/render.jsonl instead.
+    m = metrics.open_metrics()
     state = load_state(cfg["state"])
     sig = None
     species = None
@@ -660,34 +669,45 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     if not force and not preview:
         if in_quiet_hours(cfg, datetime.now().hour):
             print("quiet hours; skip")
+            m.close(outcome="quiet-hours")
             return
         if not changed and not heal_due:
             print("no change; skip")
+            m.close(outcome="no-change")
             return
         print("refresh:", "changed" if changed else "heal")
 
+    mark = m.marks()
     try:
-        img = fit_panel(obtain_image(cfg, species))
+        img = fit_panel(obtain_image(cfg, species, m))
     except Exception as e:
         print(f"could not get image: {e}", file=sys.stderr)  # keep last panel image
+        m.close(outcome="render-failed", error=str(e))
         return
+    mark("obtain.image")
     lay = layout_of(cfg)
     img = mat_and_center(img, lay["mat"], lay["opening"], lay["aspect"],
                          lay["title"], lay["collage"], lay["gap"], lay["title_position"])
+    mark("mat.and.centre")
     if preview:
         out = quantize_spectra6(img)
         if mat_box:
             _draw_mat_box(out, lay["opening"], lay["aspect"])
         out.save(preview)
+        mark("dither.and.save")
         print(f"wrote preview {preview}")
+        m.close(outcome="preview", species=len(species or []))
         return
     try:
         push_panel(img, cfg["rotate"], cfg["saturation"], cfg.get("panel", ""))
     except Exception as e:
         print(f"panel push failed: {e}", file=sys.stderr)
+        m.close(outcome="push-failed", error=str(e))
         return
+    mark("panel.push")
     save_state(cfg["state"], sig if sig is not None else state.get("signature"), now)
     print("panel updated")
+    m.close(outcome="updated", species=len(species or []))
 
 
 def _toml_error(path, exc):

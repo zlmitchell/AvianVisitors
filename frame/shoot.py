@@ -28,6 +28,11 @@ import sys
 import threading
 import urllib.parse
 
+# `_metrics` rather than `metrics`, because shoot() takes a `metrics` argument
+# and a module shadowed by a parameter is a bug waiting for the one code path
+# that reaches for the module inside the function.
+import metrics as _metrics
+
 
 # --bird-weather resolves cutouts from the local clone first, then falls back to
 # the repo's raw GitHub URLs: a fresh install needs no illustration redeploy,
@@ -217,15 +222,47 @@ def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, label_scale, au
     return handler
 
 
+def _record_resources(page, m):
+    """Copy the browser's resource-timing buffer into the metrics log.
+
+    Guards itself rather than making the caller do it, so shoot() keeps one
+    straight line through the capture and gains no branch for a feature that is
+    normally off."""
+    if not m.enabled:
+        return
+    try:
+        entries = page.evaluate(
+            "() => performance.getEntriesByType('resource').map(e => ({"
+            " name: e.name, kind: e.initiatorType,"
+            " ms: Math.round(e.duration), bytes: e.transferSize || 0 }))")
+    except Exception as e:                      # never fail a render to measure it
+        m.event("resources.unavailable", error=str(e))
+        return
+    total = 0
+    for e in entries:
+        total += e.get("bytes") or 0
+        m.event("resource", name=e.get("name"), kind=e.get("kind"),
+                ms=e.get("ms"), bytes=e.get("bytes"))
+    # The collage fires eight recent-API fetches per refresh, so this is the
+    # count of full re-renders the page did to itself during the capture.
+    api = sum(1 for e in entries if "birdnet-api.php" in (e.get("name") or ""))
+    m.event("page.summary", requests=len(entries), bytes=total,
+            api_requests=api, refresh_passes=round(api / 8.0, 2))
+
+
 def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           headline_px=42, eyebrow_px=18, lowercase=False,
           mat=0.04, collage_vh=52, cluster_xbias=1.0, cluster_ybias=1.2,
           count_exp=0.4, cluster_pad=1, label_min_px=11, small_floor=0.04, window_hours=None,
           timeout_ms=45000, user=None, password=None, species=None, cutout_base=None,
           cutout_local=None, empty_text="listening for birds…", bird_names=True,
-          fresh_minutes=30, fade="0", label_scale=1.0):
+          fresh_minutes=30, fade="0", label_scale=1.0, metrics=None):
     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
+    # Marks name the work BEFORE them, so the first one closes out the browser
+    # launch. Off by default: `metrics` is the no-op unless a run asked for it.
+    m = metrics if metrics is not None else _metrics.OFF
+    mark = m.marks()
 
     # Imported here rather than at the top so this module can be imported
     # without a browser installed. --check-frontend answers a question about a
@@ -236,7 +273,9 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
+        mark("playwright.driver")
         browser = p.chromium.launch(args=["--force-color-profile=srgb", "--disable-dev-shm-usage"])
+        mark("browser.launch")
         try:
             ctx_kw = {
                 "viewport": {"width": vw, "height": vh},
@@ -265,6 +304,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                            lambda route: route.fulfill(path=hand_font))
             if cutout_base:
                 page.route("**/cutout.php*", _make_cutout_handler(cutout_base, cutout_local))
+            mark("context.and.routes")
 
             css = HIDE_CSS + _frame_css(headline_px, eyebrow_px, lowercase, pad_top, pad_side, pad_bottom, collage_vh)
             page.add_init_script(
@@ -274,6 +314,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
 
             resp = page.goto(_frame_url(url, bird_names, fresh_minutes, fade),
                              wait_until="domcontentloaded", timeout=timeout_ms)
+            mark("goto")
             if resp is None or not resp.ok:
                 raise RuntimeError(f"site returned {resp.status if resp else 'no response'}")
             if bird_names:
@@ -281,6 +322,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                     "async () => { const f = await document.fonts.load('600 16px Hand');"
                     " await document.fonts.ready;"
                     " return f.length > 0 && document.fonts.check('600 16px Hand'); }")
+                mark("font.gate")
                 if not font_loaded:
                     raise RuntimeError("collage label font did not load")
             # Wait for the collage, or for the empty-state element the page shows
@@ -288,6 +330,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
             # clean title card fast instead of hanging until the timeout. A page
             # with neither still times out here and stays fatal (keep last frame).
             page.wait_for_selector(".gtile, .empty", state="attached", timeout=timeout_ms)
+            mark("wait.collage")
             if page.query_selector(".gtile") is not None:
                 try:
                     page.wait_for_function(
@@ -296,6 +339,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                         timeout=timeout_ms)
                 except PWTimeout:
                     print("some illustrations did not finish loading; capturing anyway", file=sys.stderr)
+                mark("wait.illustrations")
                 if bird_names:
                     missing_labels = page.evaluate(
                         "() => [...document.querySelectorAll('.gtile')]"
@@ -321,6 +365,7 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
                         timeout=timeout_ms)
                 except PWTimeout:
                     print("nest illustration did not finish loading; capturing anyway", file=sys.stderr)
+                mark("wait.nest")
             if misses:
                 raise RuntimeError(f"apt.js tunables not found ({len(misses)}); refusing to ship a half-tuned frame")
 
@@ -338,14 +383,23 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
             else:
                 page.evaluate("(t) => { const e = document.querySelector('.empty'); if (e) e.textContent = t; }", empty_text)
             page.wait_for_timeout(250)
-            # clip is CSS px; device_scale_factor scales the PNG to vw*dsf by vh*dsf = 1200x1600
+            mark("titles.and.settle")
+            # What the page actually fetched, straight out of the browser's own
+            # timing buffer. One call, and it answers two questions at once: what
+            # every asset weighed, and - by counting the recent-API entries, which
+            # the collage requests eight at a time - how many times the page
+            # re-rendered itself while we were photographing it.
+            _record_resources(page, m)
             page.screenshot(path=out, clip={"x": 0, "y": 0, "width": vw, "height": vh})
+            mark("screenshot")
         finally:
             browser.close()
+            mark("browser.close")
     return out
 
 
-def shoot_birdweather(out, species, *, title=None, subtitle=None, timeout_ms=45000, **look):
+def shoot_birdweather(out, species, *, title=None, subtitle=None, timeout_ms=45000,
+                      metrics=None, **look):
     """Render `species` ([{sci,com,n}]) as the BirdWeather collage into `out`.
 
     The mic path screenshots a live site; this builds the same page from a
@@ -372,7 +426,7 @@ def shoot_birdweather(out, species, *, title=None, subtitle=None, timeout_ms=450
     return shoot(f"http://127.0.0.1:{port}/", out,
                  title=title or "Avian Visitors", subtitle=subtitle or "Heard Today",
                  species=species, cutout_base=RAW_ILLUSTRATIONS, cutout_local=cutout_local,
-                 timeout_ms=timeout_ms, **look)
+                 timeout_ms=timeout_ms, metrics=metrics, **look)
 
 
 def main():
