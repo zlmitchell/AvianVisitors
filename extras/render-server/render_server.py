@@ -29,6 +29,8 @@ import threading
 import time
 import traceback
 
+from PIL import Image, ImageChops
+
 sys.path.insert(0, os.environ.get("FRAME_DIR", "/repo/frame"))
 import display                                    # noqa: E402
 from shoot import shoot                           # noqa: E402
@@ -55,6 +57,28 @@ def load():
     return cfg
 
 
+# Least ink the collage half of a plate may carry and still be believable, as
+# a percentage of that half. Measured: a plate with one bird carries 7.9%, and
+# one where the illustrations never arrived carries 0.14% - the lettering, and
+# nothing else. Anything between those is not a picture of a quiet day, it is a
+# picture of a render that went wrong, and 1% sits an order of magnitude clear
+# of both. A genuinely birdless station is not caught by this: the empty state
+# draws a nest, which is an illustration like any other.
+MIN_COLLAGE_INK = 1.0
+
+
+def collage_ink(path):
+    """Percent of the plate below the title band that is not paper."""
+    im = Image.open(path).convert("RGB")
+    corners = [im.getpixel(p) for p in
+               ((0, 0), (im.width - 1, 0), (0, im.height - 1), (im.width - 1, im.height - 1))]
+    paper = tuple(sorted(c[i] for c in corners)[len(corners) // 2] for i in range(3))
+    diff = ImageChops.difference(im, Image.new("RGB", im.size, paper)).convert("L")
+    lower = diff.crop((0, int(im.height * 0.25), im.width, im.height))
+    on = sum(1 for v in lower.getdata() if v > 34)
+    return on / (lower.width * lower.height) * 100
+
+
 def render_once(cfg, why):
     tmp = PARTIAL
     # The same call display.py makes on its mic path, field for field - the
@@ -71,9 +95,25 @@ def render_once(cfg, why):
           bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
           fade=display.fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
           label_scale=display.label_scale(cfg))
+    # A render can succeed and still be wrong. The browser reports the
+    # illustrations loaded, and if the screenshot is taken before they are
+    # painted the plate comes out with its lettering and no birds - which the
+    # Pi then mats by cropping to the only ink it can find, magnifying a bird
+    # name until it fills the panel. That reached the wall once. Keep the last
+    # good picture instead: a frame showing yesterday's birds is a far better
+    # failure than one showing a giant caption.
+    ink = collage_ink(tmp)
+    if ink < MIN_COLLAGE_INK:
+        os.unlink(tmp)
+        print(f"REFUSED ({why}): collage is {ink:.2f}% ink, under {MIN_COLLAGE_INK}% - "
+              f"the illustrations did not make it into the capture. Keeping the "
+              f"previous frame.", flush=True)
+        return False
     # Atomic, so the Pi can never fetch a half-written PNG.
     os.replace(tmp, OUT)
-    print(f"rendered ({why}) -> {OUT} {os.path.getsize(OUT)} bytes", flush=True)
+    print(f"rendered ({why}) -> {OUT} {os.path.getsize(OUT)} bytes, {ink:.1f}% ink",
+          flush=True)
+    return True
 
 
 def loop():
@@ -91,8 +131,11 @@ def loop():
             # function of the birds, so an unchanged signature means an
             # identical PNG and the Pi's gate would ignore it anyway.
             if sig != last or not os.path.exists(OUT):
-                render_once(cfg, "changed" if last else "first run")
-                last = sig
+                # Only remember the signature once a plate for it is actually
+                # published, so a refused render is retried rather than counted
+                # as done and skipped until the birds change again.
+                if render_once(cfg, "changed" if last else "first run"):
+                    last = sig
         except Exception:
             traceback.print_exc()
         time.sleep(EVERY)

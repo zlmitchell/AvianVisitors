@@ -484,7 +484,24 @@ def mat_and_center(img, mat, opening, aspect=0.75,
     # title stays a consistent size whether the collage is tall or compact
     # instead of ballooning when the collage happens to be short.
     coll = img.crop(cb)
-    cs = min(box_w * collage_frac / coll.width, (box_h - title.height - gap) / coll.height)
+    # Scale from the collage BAND, not from the ink inside it.
+    #
+    # cb is the bounding box of whatever was drawn, so on a quiet day it is one
+    # bird - and scaling that to fill the opening magnifies a lone goldfinch
+    # until it runs off the panel. Worse, it is self-defeating: the collage
+    # sizes a single bird smaller on purpose, so a quiet plate looks quiet, and
+    # a scale taken from the ink cancels exactly that by magnifying whatever is
+    # left. Measured on a real one-bird plate: 2.2x, and the tail cropped off
+    # the edge of the glass.
+    #
+    # The band is the region the collage was laid out in, which is a fixed share
+    # of the viewport (shoot_collage_vh) and so always the same shape whether it
+    # holds one bird or thirty. Scaling by that fills the opening for a full
+    # plate exactly as before - a busy collage's ink nearly is its band - while
+    # leaving a sparse one sparse. The crop stays the ink box, because that is
+    # what centres the picture; only the scale changes.
+    band_w, band_h = img.width, max(1, bot + 1 - split[1])
+    cs = min(box_w * collage_frac / band_w, (box_h - title.height - gap) / band_h)
     collage = coll.resize((max(1, round(coll.width * cs)), max(1, round(coll.height * cs))), Image.LANCZOS)
     ccx = _centroid_x(collage, paper)  # centre the collage by ink weight, not bbox
     half = max(ccx, collage.width - ccx)
