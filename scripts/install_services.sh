@@ -20,7 +20,12 @@ install_depends() {
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
   apt -qqq update && apt -qqy upgrade
   echo "icecast2 icecast2/icecast-setup boolean false" | debconf-set-selections
-  apt install --no-install-recommends -qqy caddy sqlite3 php-sqlite3 php-fpm php-curl php-xml php-zip php-mbstring php icecast2 \
+  # php-gd: cutout.php resizes with it. The Wikipedia/rembg path has called
+  # imagecreatefrompng and imagecopyresampled since it was written, so on a
+  # station without gd that path was already a fatal - it just only fired for
+  # a species with no bundled illustration. The collage now asks for cutouts
+  # at the size it draws them, which needs the same extension.
+  apt install --no-install-recommends -qqy caddy sqlite3 php-sqlite3 php-fpm php-curl php-xml php-zip php-mbstring php-gd php icecast2 \
     pulseaudio avahi-utils sox libsox-fmt-mp3 alsa-utils ffmpeg \
     wget curl unzip bc \
     python3-pip python3-venv lsof net-tools inotify-tools

@@ -249,6 +249,29 @@ def _record_resources(page, m):
     m.event("page.summary", requests=len(entries), bytes=total,
             api_requests=api, refresh_passes=round(api / 8.0, 2))
 
+    # How much bigger each illustration is than the box it is drawn in. An
+    # asset fetched at 614x598 to be painted at 150x150 costs its bytes, its
+    # decode, and a full-size RGBA bitmap resident in a renderer that has 415MB
+    # to live in - and the last of those is the one that does not show up in a
+    # byte count. devicePixelRatio is in here because the frame captures at
+    # dsf=2, so the honest target is CSS box times that, not the CSS box.
+    try:
+        tiles = page.evaluate(
+            "() => { const d = window.devicePixelRatio || 1;"
+            " return [...document.querySelectorAll('.gtile img')].map(i => ({"
+            "  sci: i.closest('.gtile')?.getAttribute('data-sci') || '?',"
+            "  natural: [i.naturalWidth, i.naturalHeight],"
+            "  drawn: [Math.round(i.clientWidth * d), Math.round(i.clientHeight * d)]"
+            " })); }")
+    except Exception:
+        return
+    for t in tiles:
+        nw, nh = t.get("natural") or (0, 0)
+        dw, dh = t.get("drawn") or (0, 0)
+        ratio = round((nw * nh) / (dw * dh), 1) if dw and dh else None
+        m.event("tile.image", sci=t.get("sci"), natural=f"{nw}x{nh}",
+                drawn=f"{dw}x{dh}", pixel_ratio=ratio)
+
 
 def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           headline_px=42, eyebrow_px=18, lowercase=False,

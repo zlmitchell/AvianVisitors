@@ -473,8 +473,23 @@
     return base + '&v=' + (version || SKETCH_VERSION);
   }
 
-  function collageImageSrc(sci, pose, commonName) {
-    return defaultCutoutSrc(sci, pose, IMG_VERSION, commonName);
+  // The collage asks for the size it is going to draw, which the atlas and the
+  // postcard deliberately do not - they show one bird large and want the whole
+  // illustration. A tile does not: on a ten-bird plate the sources carried
+  // 12.8x the pixels that were painted, and the smallest bird 67x. Bytes are
+  // the least of it; the frame decodes every one of those into a full-size
+  // RGBA bitmap inside a browser with 415MB to live in.
+  //
+  // devicePixelRatio is in here because the frame captures at a device scale
+  // factor of 2, so the honest target is the CSS box times that. Bucketed to
+  // 64px so the variant cache holds a handful of sizes per species instead of
+  // one per pixel, and because tile sizes already snap to count brackets the
+  // buckets repeat from render to render - a warm cache after the first plate.
+  function collageImageSrc(sci, pose, commonName, cssW) {
+    var src = defaultCutoutSrc(sci, pose, IMG_VERSION, commonName);
+    var px = Math.ceil((+cssW || 0) * (window.devicePixelRatio || 1));
+    if (px > 0) src += '&w=' + Math.min(1024, Math.ceil(px / 64) * 64);
+    return src;
   }
 
   // Tunables - Galliformes-poster-inspired. Raster-mask nesting.
@@ -2561,7 +2576,7 @@
       // com flows through so the worker's JIT Gemini job uses the right
       // common name in its prompt for a freshly-detected species.
       // &v=IMG_VERSION busts CF edge cache when we re-render any species.
-      var img = collageImageSrc(s.sci, r.pose, s.com);
+      var img = collageImageSrc(s.sci, r.pose, s.com, r.fullW);
       var btn = document.createElement('button');
       btn.className = 'gtile';
       btn.type = 'button';

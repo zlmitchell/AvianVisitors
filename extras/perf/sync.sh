@@ -17,7 +17,9 @@ set -euo pipefail
 SOURCE=${SOURCE:-/source}
 DEST=${DEST:-$HOME/BirdNET-Pi}
 
-for rel in frame avian/frontend; do
+# avian/api too: cutout.php decides what an illustration weighs, which is
+# the largest single line item in a render.
+for rel in frame avian/frontend avian/api; do
   [ -d "$SOURCE/$rel" ] || { echo "missing $SOURCE/$rel" >&2; exit 1; }
   # -a without -delete: a stray file in the clone is harmless, but deleting the
   # venv because /source has no .venv would not be.

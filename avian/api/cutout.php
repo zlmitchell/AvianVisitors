@@ -39,7 +39,69 @@ $pose = (int)($_GET['pose'] ?? 1);
 if ($pose !== 2) $pose = 1;
 $poseSuffix = $pose === 1 ? '' : "-$pose";
 
+// Optional ?w= - the width the caller is actually going to draw this at.
+//
+// The illustrations are drawn for the website, where a postcard shows one at
+// full size. The collage paints them into tiles: measured on a ten-bird plate,
+// the source carried 12.8x more pixels than were drawn, and the worst single
+// bird 67x - 741x1047 of PNG to fill 90x128. On a machine with room that is
+// only wasted bandwidth. On the frame's Pi it is also a full-size RGBA bitmap
+// resident in a browser that has 415MB to live in, which is the cost that does
+// not show up in a byte count.
+//
+// Bucketed to 64px and capped, here as well as in the caller: a client is not
+// trusted to keep the variant cache from exploding into one file per pixel.
+$reqW = (int)($_GET['w'] ?? 0);
+if ($reqW > 0) {
+    $reqW = (int)(ceil(min($reqW, 1024) / 64) * 64);
+}
+// Variants live beside the rembg cache rather than in assets/, which is the
+// repository's and gets replaced wholesale by an update.
+$variantDir = dirname(__DIR__, 3) . '/BirdSongs/Extracted/cutouts/sized';
+
+// Shrink $src to $w wide, preserving alpha, atomically. Returns false and
+// leaves nothing behind if GD is missing or the encode fails, so a caller can
+// always fall back to the original.
+function make_variant(string $src, string $dst, int $w): bool {
+    if (!function_exists('imagecreatefrompng')) return false;
+    $im = @imagecreatefrompng($src);
+    if ($im === false) return false;
+    $sw = imagesx($im); $sh = imagesy($im);
+    if ($sw < 1 || $sh < 1) { imagedestroy($im); return false; }
+    $nw = $w;
+    $nh = (int)max(1, round($sh * ($w / $sw)));
+    $out = imagecreatetruecolor($nw, $nh);
+    imagealphablending($out, false);
+    imagesavealpha($out, true);
+    imagecopyresampled($out, $im, 0, 0, 0, 0, $nw, $nh, $sw, $sh);
+    imagedestroy($im);
+    @mkdir(dirname($dst), 0755, true);
+    $tmp = $dst . '.' . getmypid() . '.tmp';
+    $ok = imagepng($out, $tmp, 6);
+    imagedestroy($out);
+    // rename is atomic on one filesystem, so a concurrent reader sees either
+    // no variant or a complete one - never a half-written PNG.
+    if ($ok && @rename($tmp, $dst)) return true;
+    @unlink($tmp);
+    return false;
+}
+
 function serve_png(string $path): void {
+    global $reqW, $variantDir, $slug;
+    // Only ever downscale. A tile larger than the illustration gets the
+    // illustration; upscaling would spend cache on a worse picture.
+    if ($reqW > 0 && $variantDir !== '') {
+        $size = @getimagesize($path);
+        if ($size !== false && (int)$size[0] > $reqW) {
+            // Keyed on the resolved source, not on the request: pose=2 falls
+            // back to the pose-1 file, and two sources must not share a key.
+            $key = $slug . '-' . substr(sha1($path), 0, 8) . "-w$reqW.png";
+            $variant = "$variantDir/$key";
+            if (is_file($variant) || make_variant($path, $variant, $reqW)) {
+                $path = $variant;
+            }
+        }
+    }
     header('Content-Type: image/png');
     header('Cache-Control: public, max-age=86400');
     header('Content-Length: ' . (string)filesize($path));
