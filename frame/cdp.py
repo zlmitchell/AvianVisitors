@@ -480,10 +480,16 @@ def _find_shell():
     Reusing playwright's binary rather than asking for another install: the
     point of this module is to stop running playwright's *driver*, not to stop
     using the browser it fetched."""
-    root = os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")
-    if os.path.isdir(root):
+    # PLAYWRIGHT_BROWSERS_PATH first: the render server's image sets it, and a
+    # binary that merely happens to be on PATH there is a different build from
+    # the one playwright pinned. Falling through to PATH found one and worked,
+    # which is exactly how a version skew would go unnoticed until it did not.
+    for root in (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "",
+                 os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright")):
+        if not root or not os.path.isdir(root):
+            continue
         builds = sorted((d for d in os.listdir(root) if d.startswith("chromium_headless_shell-")),
-                        key=lambda d: int(re.sub(r"\D", "", d) or 0), reverse=True)
+                        key=lambda d: int(re.sub(r"\D", "", d) or 0), reverse=True)  # noqa: E501
         # Walked, and looking for either name. The x86 build unpacks
         # chrome-headless-shell-linux64/chrome-headless-shell; the aarch64 build
         # - which is the machine this exists for - unpacks chrome-linux/
