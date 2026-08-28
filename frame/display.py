@@ -677,7 +677,7 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
             return
         print("refresh:", "changed" if changed else "heal")
 
-    mark = m.marks()
+    mark = m.marks(scope="display")
     try:
         img = fit_panel(obtain_image(cfg, species, m))
     except Exception as e:

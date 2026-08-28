@@ -51,26 +51,41 @@ def _window(mon, lo, hi):
 
 
 def phases(recs, mon=None):
+    """One table per scope.
+
+    display.py's marks wrap shoot()'s, so the two streams nest: adding them
+    together reports twenty seconds for a twelve-second render. Each scope's
+    percentages are of its own total, and the outer one is printed first
+    because that is the one that adds up to the wall clock.
+    """
     rows = [r for r in recs if r.get("kind") == "phase"]
     if not rows:
         return
-    total = sum(r.get("secs") or 0 for r in rows)
     start = next((r.get("wall") for r in recs if r.get("kind") == "start"), None)
     joined = bool(mon) and start is not None
-    head = f"  PHASES                       {total:8.1f}s accounted for"
-    print("", head + ("      peak MB   cpu%" if joined else ""), sep=chr(10))
+    scopes = []
     for r in rows:
-        secs = r.get("secs") or 0
-        share = secs / total if total else 0
-        flag = "  <-- " + r["failed"] if r.get("failed") else ""
-        # the bar is padded so the joined columns line up under their header
-        line = f"    {r['name']:<24} {secs:8.2f}s {share * 100:5.1f}%  {_bar(share):<28}"
-        if joined:
-            end = start + (r.get("t") or 0)
-            mb, cpu = _window(mon, end - secs, end)
-            line += f" {mb:8.0f}" if mb is not None else "         -"
-            line += f" {cpu:6.0f}" if cpu is not None else "      -"
-        print(line + flag)
+        s = r.get("scope") or ""
+        if s not in scopes:
+            scopes.append(s)
+    for scope in sorted(scopes, key=lambda s: 0 if s == "display" else 1):
+        group = [r for r in rows if (r.get("scope") or "") == scope]
+        total = sum(r.get("secs") or 0 for r in group)
+        title = f"PHASES [{scope}]" if scope else "PHASES"
+        print("")
+        print(f"  {title:<28} {total:8.1f}s"
+              + ("      peak MB   cpu%" if joined else ""))
+        for r in group:
+            secs = r.get("secs") or 0
+            share = secs / total if total else 0
+            flag = "  <-- " + r["failed"] if r.get("failed") else ""
+            line = f"    {r['name']:<24} {secs:8.2f}s {share * 100:5.1f}%  {_bar(share):<20}"
+            if joined:
+                end = start + (r.get("t") or 0)
+                mb, cpu = _window(mon, end - secs, end)
+                line += f" {mb:8.0f}" if mb is not None else "         -"
+                line += f" {cpu:6.0f}" if cpu is not None else "      -"
+            print(line + flag)
 
 
 def memory(recs):

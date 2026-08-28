@@ -133,7 +133,7 @@ class _Off:
     def phase(self, phase, **fields):
         return self
 
-    def marks(self):
+    def marks(self, **fixed):
         return lambda name, **fields: None
 
     def __enter__(self):
@@ -181,13 +181,15 @@ class _Marks:
     Consequently a mark names the work BEFORE it, not after.
     """
 
-    def __init__(self, sink):
+    def __init__(self, sink, fixed=None):
         self._sink = sink
+        self._fixed = fixed or {}
         self._last = time.perf_counter()
 
     def __call__(self, name, **fields):
         now = time.perf_counter()
-        rec = dict(fields)
+        rec = dict(self._fixed)
+        rec.update(fields)
         rec["kind"] = "phase"
         rec["name"] = name
         rec["secs"] = round(now - self._last, 4)
@@ -233,8 +235,8 @@ class Metrics:
     def phase(self, phase, **fields):
         return _Span(self._write, phase, fields)
 
-    def marks(self):
-        return _Marks(self._write)
+    def marks(self, **fixed):
+        return _Marks(self._write, fixed)
 
     def event(self, event, **fields):
         rec = dict(fields)

@@ -262,7 +262,10 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
     # Marks name the work BEFORE them, so the first one closes out the browser
     # launch. Off by default: `metrics` is the no-op unless a run asked for it.
     m = metrics if metrics is not None else _metrics.OFF
-    mark = m.marks()
+    # display.py's marks wrap this whole function, so the two streams nest and
+    # must not be added together. Tagging the scope is what lets the report
+    # total them separately instead of reporting 20s for a 12s render.
+    mark = m.marks(scope="shoot")
 
     # Imported here rather than at the top so this module can be imported
     # without a browser installed. --check-frontend answers a question about a

@@ -43,10 +43,21 @@ Also: `free` inside the container shows the host's memory, because
 ```sh
 docker compose build
 docker compose up -d
-docker compose exec -u bird pi perf-install        # once, slow
-docker compose exec -u bird pi perf-render base    # an instrumented render
-python report.py out/base.jsonl
+docker compose exec -u bird pi perf-install        # once, ~25 min
+docker compose restart pi                          # the reboot the installer wanted
+docker compose exec -u bird pi perf-seed           # a reproducible day of birds
+docker compose exec -u bird pi perf-render base -o base_url=http://localhost
+python report.py out/base.jsonl --monitor out/monitor.jsonl
 ```
+
+`perf-install` ends at a stubbed `reboot`, so the units it enabled are not
+running yet — restart the container once and systemd starts the lot.
+
+Stop the frame's own timer before measuring (`systemctl stop birdframe.timer`),
+or it will be mid-render holding the lock when you try to take a reading.
+
+To test a change: edit the host checkout, `perf-sync`, render again. Re-running
+`perf-install` for a one-line edit would take half an hour.
 
 `perf-render` writes `out/<name>.jsonl` and `out/<name>.png`, which land in the
 host checkout through the bind mount. `out/` is gitignored.
@@ -95,6 +106,8 @@ touches one).
 | `docker-compose.yml` | the caps, the mounts, and the monitor sidecar |
 | `install-inside.sh` | → `perf-install`: clone `/source`, run both real installers |
 | `render.sh` | → `perf-render`: one instrumented render to a preview file |
+| `seed-db.sh` | → `perf-seed`: a fixed day of detections, so two runs are comparable |
+| `sync.sh` | → `perf-sync`: push the host checkout's `frame/` and `avian/frontend/` into the installed clone |
 | `monitor.py` | samples the container's memory and CPU from *outside* the ceiling, via the Docker socket, so watching does not spend the budget being watched |
 | `report.py` | turns a metrics log into a phase table, a memory verdict and an asset census |
 
