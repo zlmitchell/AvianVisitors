@@ -864,6 +864,17 @@
   // the sake of hugging but has only ever seen it at 50, so this spends as
   // little of that permission as the complaint allows.
   var LABEL_CURL = 68;
+  // The frame photographs this page. It wants one collage, once, and then a
+  // still picture - everything that keeps a live dashboard live is, to a
+  // camera, either wasted work or the subject moving during the exposure.
+  //
+  // Measured in the perf container against a Pi's ceiling, the two that matter:
+  // the 30s poll re-runs refreshAll() - a full repack AND a full atlas rebuild
+  // - which on a render taking minutes is a dozen re-renders racing the
+  // screenshot; and renderAtlas rebuilds a card per lifelist species inside a
+  // display:none subtree, where about one stamp template in four still emits a
+  // real <img> that Chromium fetches anyway.
+  var frameMode = /[?&]frame=1\b/.test(location.search);
   var labelParam = /[?&]labels=(1|0)\b/.exec(location.search);
   function labelsOn() {
     if (labelParam) return labelParam[1] === '1';
@@ -4740,6 +4751,9 @@
   }
 
   function renderAtlas(animate) {
+    // Hidden on the frame's plate, and not cheap to build: skip it rather
+    // than spend a 415MB budget on a DOM nobody photographs.
+    if (frameMode) return;
     var grid = document.getElementById('atlasGrid');
     if (!grid) return;
     var priorRects = atlasRects(grid);
@@ -5225,6 +5239,8 @@
   var pollTimer = null;
   function startPolling() {
     stopPolling();
+    // A camera does not need the picture to keep changing while it is open.
+    if (frameMode) return;
     pollTimer = setInterval(function () {
       if (document.hidden) return;
       refreshAll();

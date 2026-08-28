@@ -96,7 +96,12 @@ def _frame_url(url, bird_names, fresh_minutes=0, fade="0"):
     fade = "0" turns the fade off, otherwise it is "<start>-<end>" in hours."""
     parts = urllib.parse.urlsplit(url)
     query = [(key, value) for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-             if key not in ("labels", "fresh", "fade")]
+             if key not in ("labels", "fresh", "fade", "frame")]
+    # Tell the page it is being photographed rather than read. It then draws
+    # the collage once and holds still: no 30-second poll re-rendering the
+    # plate underneath the screenshot, and no atlas built for a view the
+    # frame crops away. A page predating the flag ignores it, as before.
+    query.append(("frame", "1"))
     query.append(("labels", "1" if bird_names else "0"))
     query.append(("fresh", str(max(0, int(fresh_minutes or 0)))))
     query.append(("fade", str(fade or "0")))
