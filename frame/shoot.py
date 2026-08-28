@@ -360,9 +360,26 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
             # when the mic has heard nothing yet, so a birdless frame renders a
             # clean title card fast instead of hanging until the timeout. A page
             # with neither still times out here and stays fatal (keep last frame).
-            page.wait_for_selector(".gtile, .empty", state="attached", timeout=timeout_ms)
-            mark("wait.collage")
-            if page.query_selector(".gtile") is not None:
+            # [data-collage] appears when renderCollage has finished and says
+            # which way it went. Waiting for ".gtile, .empty" instead looks
+            # equivalent and is not: the page paints the empty nest first on any
+            # load where the species list has not arrived, so .empty won that
+            # race every time and the frame took the birdless branch, then
+            # photographed whatever turned up during a 250ms sleep.
+            #
+            # Falls back to the old selector so a station serving an older
+            # collage - the two are separate clones and one can lag - still
+            # renders instead of timing out. That path keeps the old race; it is
+            # a compatibility shim, not the intended route.
+            try:
+                page.wait_for_selector("[data-collage]", state="attached", timeout=timeout_ms)
+                settled = page.get_attribute(".gcollage[data-collage], [data-collage]",
+                                             "data-collage")
+            except PWTimeout:
+                page.wait_for_selector(".gtile, .empty", state="attached", timeout=timeout_ms)
+                settled = None
+            mark("wait.collage", settled=settled or "unknown")
+            if settled == "birds" or page.query_selector(".gtile") is not None:
                 try:
                     page.wait_for_function(
                         "() => { const t=[...document.querySelectorAll('.gtile img')];"

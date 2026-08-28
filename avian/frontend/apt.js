@@ -2431,6 +2431,7 @@
     // path repopulates collagePlaced once the new tiles are placed.
     collagePlaced = [];
     collageHovered = null;
+    collage.removeAttribute('data-collage');
     if (!items.length) {
       // No birds heard yet: show an empty nest where the collage would be, with
       // the status line beneath it. The frame (shoot.py) overrides the .empty
@@ -2448,6 +2449,8 @@
         clearTimeout(collageEntranceT);
         collageEntranceT = setTimeout(function () { enest.classList.remove('entering'); }, 900);
       }
+      // Settled, and settled on nothing. See the data-collage note below.
+      collage.setAttribute('data-collage', 'empty');
       return;
     }
     // Silhouettes (DIMS/MASKS) load async from dims.json/masks.json; until
@@ -2677,6 +2680,16 @@
     collage.appendChild(tip);
     // Stash the placed tiles so the alpha-mask hit-tester (below) can
     // resolve which silhouette the cursor is actually over.
+    // The plate has finished. Nothing else says so: the empty nest above is
+    // painted first on any load where the species list has not arrived yet, and
+    // the packer returns early while the masks are still parsing, so an
+    // onlooker watching for ".gtile, .empty" sees .empty first every time and
+    // concludes there are no birds. That is exactly what the frame was doing -
+    // three runs out of three took the empty-state branch and then captured a
+    // collage that happened to arrive during a 250ms sleep. This attribute is
+    // the difference between "not drawn yet" and "drawn, and there is nothing
+    // to draw", which is the question the frame is actually asking.
+    collage.setAttribute('data-collage', 'birds');
     collagePlaced = placed.filter(function (t) { return t.x > -1000; });
 
     // Bloom the birds in from the centre outward, but only when asked
