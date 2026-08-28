@@ -1,0 +1,72 @@
+# The Pi's footprint, on whatever machine you have.
+#
+#   docker compose build
+#   docker compose up -d
+#   docker compose exec -u bird pi perf-install     # once, ~15-30 min
+#   docker compose exec -u bird pi perf-render base
+#   python report.py out/base.jsonl
+#
+# ONE constrained service, not two. The station and the frame are separate
+# systemd services, so modelling them as separate compose services is the
+# obvious move and it is wrong: docker limits are per-container, and what makes
+# this problem a problem is that both halves draw on ONE 415MB pool. Two
+# containers with 200MB each would be a different machine with a different
+# failure. They share a container here because they share a Pi there.
+services:
+  pi:
+    build: .
+    container_name: avian-perf-pi
+    # systemd as PID 1 needs to own its cgroup and mount things.
+    privileged: true
+    # PRIVATE, not host. systemd is happy either way on cgroup v2, but the host
+    # namespace puts /sys/fs/cgroup at the VM's root, where memory.max does not
+    # exist and the container reads the machine's 12GB instead of its own 415MB
+    # - which would quietly make metrics.py sample the wrong thing and report a
+    # render that never came near its ceiling. Private puts the container's own
+    # limits at the root of the mount, where both systemd and metrics.py expect
+    # them. (`free` still shows the VM: /proc/meminfo is not namespaced. Read
+    # the cgroup files, not free.)
+    cgroup: private
+    stop_grace_period: 10s
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      # The checkout under test, read-only: perf-install clones out of it, so
+      # nothing the installer does can reach the host repository.
+      - ../..:/source:ro
+      # The install survives `down`/`up`; rebuilding a tflite venv and a
+      # chromium download for every experiment would make the lab useless.
+      - pi-home:/home/bird
+      # Renders and metrics land in the host checkout, so report.py can read
+      # them directly. extras/perf/out/ is gitignored.
+      - ./out:/source/extras/perf/out
+    # --- the whole point ---------------------------------------------------
+    # 415MB is MemTotal on the real Pi: 512MB less the 64MB GPU split.
+    mem_limit: 415m
+    # Swap ceiling. memswap_limit is memory PLUS swap, so this allows ~2.1GB of
+    # swap on top, which is the Pi's zram (207MB) plus its 2GB file, near enough.
+    # It will not behave like an SD card, and it is not pretending to.
+    memswap_limit: 2515m
+    # Four Cortex-A53 at 1.4GHz is roughly one modern core's throughput. This is
+    # the crudest part of the model and the one to distrust first.
+    cpus: 1.0
+    cpuset: "0-3"
+
+  # Watches from outside the ceiling, so observing does not spend the budget
+  # being measured. metrics.py samples the same cgroup from inside during a
+  # render - this is the baseline between renders, and the check that the cap
+  # is actually being enforced.
+  monitor:
+    build: .
+    container_name: avian-perf-monitor
+    depends_on: [pi]
+    entrypoint: ["/usr/bin/python3", "/monitor.py", "avian-perf-pi", "/out/monitor.jsonl"]
+    volumes:
+      - ./monitor.py:/monitor.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./out:/out
+    restart: unless-stopped
+
+volumes:
+  pi-home:

@@ -44,6 +44,18 @@ import time
 #                   none; a render that is thrashing has millions.
 _CGROUP_FILES = ("memory.current", "memory.peak", "memory.swap.current")
 
+# Two cgroups get sampled, because they answer different questions and neither
+# answers both.
+#
+# The process's OWN cgroup is what this render is using - under systemd, the
+# service's slice. That is the honest figure for "what did the frame cost".
+#
+# The MOUNT ROOT is the ceiling it is pressing against: the container's limit in
+# a private cgroup namespace, the whole machine on the Pi. That is where the cap
+# lives and where contention with the analyser shows up, and it is why the
+# pressure files are read there and not in the slice.
+_CGROUP_MOUNT = "/sys/fs/cgroup"
+
 
 def _read_int(path):
     try:
@@ -236,15 +248,24 @@ class Metrics:
         if self._cg:
             for name in _CGROUP_FILES:
                 rec[name.replace(".", "_")] = _read_int(os.path.join(self._cg, name))
-            rec["mem_pressure"] = _pressure(os.path.join(self._cg, "memory.pressure"))
-            rec["cpu_pressure"] = _pressure(os.path.join(self._cg, "cpu.pressure"))
-            rec["io_pressure"] = _pressure(os.path.join(self._cg, "io.pressure"))
-            rec["pgmajfault"] = self._stat_field("pgmajfault")
+            rec["pgmajfault"] = self._stat_field(self._cg, "pgmajfault")
+        if os.path.isdir(_CGROUP_MOUNT):
+            for name in _CGROUP_FILES + ("memory.max",):
+                rec["box_" + name.replace(".", "_")] = _read_int(
+                    os.path.join(_CGROUP_MOUNT, name))
+            rec["box_pgmajfault"] = self._stat_field(_CGROUP_MOUNT, "pgmajfault")
+            # Pressure belongs to the ceiling, not to the slice. It measures the
+            # share of the last ten seconds in which something was stalled
+            # waiting, and what stalls a render is the box running out - the
+            # render's own slice can look healthy while the machine thrashes.
+            rec["mem_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "memory.pressure"))
+            rec["cpu_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "cpu.pressure"))
+            rec["io_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "io.pressure"))
         self._write(rec)
 
-    def _stat_field(self, key):
+    def _stat_field(self, cg, key):
         try:
-            with open(os.path.join(self._cg, "memory.stat"), "r", encoding="ascii") as f:
+            with open(os.path.join(cg, "memory.stat"), "r", encoding="ascii") as f:
                 for line in f:
                     name, _, value = line.partition(" ")
                     if name == key:
