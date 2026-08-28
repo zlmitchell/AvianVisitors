@@ -2468,8 +2468,22 @@
         clearTimeout(collageEntranceT);
         collageEntranceT = setTimeout(function () { enest.classList.remove('entering'); }, 900);
       }
-      // Settled, and settled on nothing. See the data-collage note below.
-      collage.setAttribute('data-collage', 'empty');
+      // Settled, and settled on nothing - but ONLY once the window's species
+      // have actually been fetched. DATA.recent is undefined until then, and
+      // this function is reached before it lands: the silhouette tables and the
+      // label font each re-render the collage when they are ready, and neither
+      // waits on the API. Stamping 'empty' there says "drawn, and there was
+      // nothing to draw" about a plate that has not been told what to draw yet.
+      //
+      // The frame reads exactly that attribute to decide the station heard
+      // nothing, so it photographed an empty nest on a morning with six birds
+      // singing. It survived only because the render server counts ink and
+      // refused the plate; had the nest finished loading it would have carried
+      // enough ink to pass, and gone on the wall.
+      //
+      // The nest itself still paints, so the page keeps the same loading state
+      // it always had. What it no longer does is call that state final.
+      if (DATA.recent) collage.setAttribute('data-collage', 'empty');
       return;
     }
     // Silhouettes (DIMS/MASKS) load async from dims.json/masks.json; until
