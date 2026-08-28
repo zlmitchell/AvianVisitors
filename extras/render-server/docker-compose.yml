@@ -15,6 +15,20 @@ services:
     build: .
     container_name: avian-render-server
     restart: unless-stopped
+    # Chromium refuses to run as root without --no-sandbox, and adding that flag
+    # to work around a container would weaken the browser everywhere else the
+    # frame runs. The playwright image ships an unprivileged pwuser for exactly
+    # this; on the Pi the frame already runs as an ordinary user, so this makes
+    # the two match rather than papering over a difference.
+    user: pwuser
+    # Chromium's own sandbox needs syscalls (user namespaces, clone flags) that
+    # Docker's default seccomp profile blocks, so it dies with SIGTRAP on
+    # startup. Relaxing seccomp lets the browser keep its sandbox, which is the
+    # better trade than switching the sandbox off with --no-sandbox: that flag
+    # would have to live in shoot.py and would follow the frame everywhere,
+    # including onto the Pi, to work around a container.
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "8080:8080"
     environment:

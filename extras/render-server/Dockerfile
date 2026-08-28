@@ -15,11 +15,21 @@ FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 # how large the lettering should be.
 RUN pip install --no-cache-dir --break-system-packages playwright==1.56.0 "Pillow>=10,<12"
 
+# Put the headless shell on PATH under both of its names. This image keeps its
+# browsers in /ms-playwright; frame/cdp.py looks in ~/.cache/ms-playwright and
+# then falls back to `which`. A symlink is all it needs, and shoot.py then runs
+# here whether it is driving playwright or the CDP client.
+RUN exe=$(find /ms-playwright -type f -perm -u+x -name 'chrome-headless-shell' -o \
+              -type f -perm -u+x -name 'headless_shell' | head -1) && \
+    test -n "$exe" && \
+    ln -sf "$exe" /usr/local/bin/chrome-headless-shell && \
+    ln -sf "$exe" /usr/local/bin/headless_shell
+
 # The server is NOT copied in. It lives in the repository, which is mounted, so
-# there is one copy of it and editing it does not need an image rebuild - which
-# is exactly the trap this fell into once already: --force-recreate restarts a
-# container without rebuilding, so a fixed script kept failing with the old
-# error and looked like the fix had not worked.
+# there is one copy of it and editing it needs no image rebuild - a trap this
+# fell into once: --force-recreate restarts a container without rebuilding, so a
+# fixed script kept failing with the old error and looked like the fix had not
+# worked.
 ENV FRAME_DIR=/repo/frame OUT_DIR=/out PORT=8080
 EXPOSE 8080
 CMD ["python3", "/repo/extras/render-server/render_server.py"]
