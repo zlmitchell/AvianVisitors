@@ -120,7 +120,8 @@ DEFAULTS = {
     # 0 holds the handwriting at the physical size the A5 mat gives it, whatever
     # the opening, by cancelling out the collage's own scale-up - see
     # label_scale(). A positive value overrides that outright.
-    "label_scale": 0,
+    "label_scale": 0,
+
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
@@ -484,24 +485,27 @@ def mat_and_center(img, mat, opening, aspect=0.75,
     # title stays a consistent size whether the collage is tall or compact
     # instead of ballooning when the collage happens to be short.
     coll = img.crop(cb)
-    # Scale from the collage BAND, not from the ink inside it.
+    # Scale from the ink, so the collage fills the opening whatever is on it.
     #
-    # cb is the bounding box of whatever was drawn, so on a quiet day it is one
-    # bird - and scaling that to fill the opening magnifies a lone goldfinch
-    # until it runs off the panel. Worse, it is self-defeating: the collage
-    # sizes a single bird smaller on purpose, so a quiet plate looks quiet, and
-    # a scale taken from the ink cancels exactly that by magnifying whatever is
-    # left. Measured on a real one-bird plate: 2.2x, and the tail cropped off
-    # the edge of the glass.
+    # This was briefly scaled from the collage BAND instead - a fixed share of
+    # the viewport, always the same shape whether it held one bird or thirty -
+    # so that a quiet day would look quiet. It read correctly on a busy plate,
+    # whose ink nearly is its band, and priced every other day like a mistake:
+    # a real six-species plate measured 668px of ink inside a 1200px band and
+    # so filled 55% of a bare panel, which is about what the A5 mat used to
+    # cover. Taking the mat out is supposed to buy 3.1x the collage area, and
+    # band scaling handed most of that back on any day that was not busy -
+    # which is most days.
     #
-    # The band is the region the collage was laid out in, which is a fixed share
-    # of the viewport (shoot_collage_vh) and so always the same shape whether it
-    # holds one bird or thirty. Scaling by that fills the opening for a full
-    # plate exactly as before - a busy collage's ink nearly is its band - while
-    # leaving a sparse one sparse. The crop stays the ink box, because that is
-    # what centres the picture; only the scale changes.
-    band_w, band_h = img.width, max(1, bot + 1 - split[1])
-    cs = min(box_w * collage_frac / band_w, (box_h - title.height - gap) / band_h)
+    # The cost is accepted rather than solved: a lone bird is magnified to fill
+    # the opening again, which cancels the smaller budget apt.js hands it below
+    # four species. What that magnification must never reach is a plate whose
+    # illustrations never painted, where the only ink is a bird's NAME and this
+    # scale would blow the lettering up to the whole panel. The render server
+    # refuses those before they are served (MIN_COLLAGE_INK, added alongside
+    # band scaling and deliberately kept). A frame rendering locally has no
+    # such guard, so restoring that path means porting it here too.
+    cs = min(box_w * collage_frac / coll.width, (box_h - title.height - gap) / coll.height)
     collage = coll.resize((max(1, round(coll.width * cs)), max(1, round(coll.height * cs))), Image.LANCZOS)
     ccx = _centroid_x(collage, paper)  # centre the collage by ink weight, not bbox
     half = max(ccx, collage.width - ccx)
