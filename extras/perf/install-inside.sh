@@ -50,6 +50,26 @@ else
     || git clone "$SOURCE" "$DEST"
 fi
 
+# Docker bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf from the
+# engine. `sed -i` writes by renaming a temp file over the target, and you
+# cannot rename over a bind mount - so install_services.sh, which edits
+# /etc/hosts to name the station, dies with "Device or resource busy". Unmount
+# them and leave real files with the same contents behind. Nothing outside this
+# container reads them, and the container is privileged already because systemd
+# needs to be.
+for f in /etc/hosts /etc/hostname /etc/resolv.conf; do
+  if grep -q " ${f} " /proc/mounts 2>/dev/null; then
+    sudo cp "$f" "$f.real" && sudo umount "$f" && sudo cp "$f.real" "$f"       && sudo rm -f "$f.real"
+  fi
+done
+
+# install_services.sh:18 does `apt install -y debian-keyring ...` with no
+# `apt update` in front of it. That is fine on a Pi, where the package lists
+# came with the OS, and fatal in a slim image, which deletes them - apt then
+# reports "Unable to locate package" for something that is plainly in main.
+say "refreshing apt lists (the image ships without them)"
+sudo apt-get update -qq
+
 say "station: scripts/install_birdnet.sh"
 cd "$DEST/scripts"
 ./install_birdnet.sh
