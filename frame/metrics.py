@@ -57,6 +57,57 @@ _CGROUP_FILES = ("memory.current", "memory.peak", "memory.swap.current")
 _CGROUP_MOUNT = "/sys/fs/cgroup"
 
 
+def _meminfo():
+    """MemTotal and MemAvailable, in bytes.
+
+    Machine-wide and always available, which the cgroup figures are not: on the
+    Pi nothing sets a limit, so there is no ceiling cgroup to read and the only
+    honest answer to "was there room" comes from here.
+    """
+    out = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="ascii") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("MemTotal", "MemAvailable", "SwapFree", "SwapTotal"):
+                    out[key] = int(rest.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def _accounted(start):
+    """Nearest cgroup at or above `start` that sets a real memory ceiling.
+
+    The mount root was the obvious choice and it is wrong on real hardware: the
+    cgroup v2 root has no memory.current at all, because nothing is outside it
+    to account against. In a container the mount root is really a nested cgroup,
+    so it answers - which is exactly the trap, because the lab read fine while
+    the Pi silently reported null for every memory figure.
+
+    "Sets a ceiling" rather than "reports memory", because the nearest cgroup
+    that merely accounts can be a leaf holding almost nothing - init.scope
+    reported 29MB inside a container capped at 415MB, which is true and useless.
+    Returns None where nothing is capped, which is the normal case on a Pi; the
+    machine-wide figures from _meminfo cover that.
+    """
+    path = start or _CGROUP_MOUNT
+    root = os.path.abspath(_CGROUP_MOUNT)
+    while True:
+        try:
+            with open(os.path.join(path, "memory.max"), "r", encoding="ascii") as f:
+                if f.read().strip() != "max":
+                    return path
+        except OSError:
+            pass
+        if os.path.abspath(path) == root:
+            return None
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
 def _read_int(path):
     try:
         with open(path, "r", encoding="ascii") as f:
@@ -215,10 +266,12 @@ class Metrics:
         self._lock = threading.Lock()
         self._t0 = time.perf_counter()
         self._cg = _cgroup_root()
+        # Where the ceiling actually is, which is not always the mount root.
+        self._box = _accounted(self._cg)
         self._stop = threading.Event()
         self._interval = 1.0 / sample_hz if sample_hz > 0 else 0
         self._write({"kind": "start", "pid": os.getpid(), "cgroup": self._cg,
-                     "wall": time.time()})
+                     "accounted_at": self._box, "wall": time.time()})
         self._thread = None
         if self._interval:
             self._thread = threading.Thread(target=self._sample_loop, daemon=True)
@@ -247,22 +300,23 @@ class Metrics:
     # --- sampling ----------------------------------------------------------
     def _sample(self):
         rec = {"kind": "sample", "rss_kb": _self_rss_kb()}
+        rec.update({k.lower(): v for k, v in _meminfo().items()})
         if self._cg:
             for name in _CGROUP_FILES:
                 rec[name.replace(".", "_")] = _read_int(os.path.join(self._cg, name))
             rec["pgmajfault"] = self._stat_field(self._cg, "pgmajfault")
-        if os.path.isdir(_CGROUP_MOUNT):
+        if self._box:
             for name in _CGROUP_FILES + ("memory.max",):
                 rec["box_" + name.replace(".", "_")] = _read_int(
-                    os.path.join(_CGROUP_MOUNT, name))
-            rec["box_pgmajfault"] = self._stat_field(_CGROUP_MOUNT, "pgmajfault")
+                    os.path.join(self._box, name))
+            rec["box_pgmajfault"] = self._stat_field(self._box, "pgmajfault")
             # Pressure belongs to the ceiling, not to the slice. It measures the
             # share of the last ten seconds in which something was stalled
             # waiting, and what stalls a render is the box running out - the
             # render's own slice can look healthy while the machine thrashes.
-            rec["mem_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "memory.pressure"))
-            rec["cpu_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "cpu.pressure"))
-            rec["io_pressure"] = _pressure(os.path.join(_CGROUP_MOUNT, "io.pressure"))
+            rec["mem_pressure"] = _pressure(os.path.join(self._box, "memory.pressure"))
+            rec["cpu_pressure"] = _pressure(os.path.join(self._box, "cpu.pressure"))
+            rec["io_pressure"] = _pressure(os.path.join(self._box, "io.pressure"))
         self._write(rec)
 
     def _stat_field(self, cg, key):
