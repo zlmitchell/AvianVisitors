@@ -1,0 +1,35 @@
+# Render the frame's plate here; the Pi just fetches the PNG.
+#
+#   cp <pi>:~/.birdframe/config.toml ./config/config.toml
+#   STATION_URL=http://birdnet.local docker compose up -d
+#
+# Then on the Pi, in ~/.birdframe/config.toml:
+#   shoot     = false
+#   image_url = "http://<this-host>:8080/frame.png"
+#
+# Deliberately NOT constrained. extras/perf exists to reproduce the Pi's
+# ceiling; this exists to escape it. Giving the renderer a 415MB cap here would
+# recreate the problem it was built to solve.
+services:
+  renderer:
+    build: .
+    container_name: avian-render-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # The station the collage is read from. On the Pi's own config this is
+      # localhost, which means something else from in here.
+      STATION_URL: "${STATION_URL:-http://birdnet.local}"
+      # How often to check whether the birds changed. Cheap off the Pi, and it
+      # has to be at least as often as the Pi's own 15-minute timer or the frame
+      # can only ever push a picture that is one cycle stale.
+      INTERVAL_SECONDS: "${INTERVAL_SECONDS:-300}"
+    volumes:
+      # The repository, for frame/shoot.py and frame/display.py. Read-only: this
+      # renders, it does not install.
+      - ../..:/repo:ro
+      # The frame's own config, so the renderer sizes the lettering for the same
+      # mat the Pi is going to cut the picture into.
+      - ./config:/config:ro
+      - ./out:/out
