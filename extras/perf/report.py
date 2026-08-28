@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read a render's metrics log and say where the time and the memory went.
 
-Usage:  report.py <render.jsonl> [...]
+Usage:  report.py <render.jsonl> [...] [--monitor <monitor.jsonl>]
 
 Phases are printed in the order they happened rather than sorted by cost,
 because the shape of a render is the point: a browser launch that dominates and
@@ -11,6 +11,11 @@ tells them apart. The share column does the sorting for you.
 Assets are grouped by the last path segment, and the summary line carries the
 number this was built to find - how many times the page re-rendered itself
 while it was being photographed.
+
+With --monitor, each phase also gets the container memory and CPU as seen from
+OUTSIDE its ceiling, which is the only way to tell "this phase was slow" apart
+from "this phase filled the box". The two logs join on wall-clock: metrics.py
+stamps the start record, the monitor stamps every sample.
 """
 import collections
 import json
@@ -34,17 +39,38 @@ def _bar(share, width=28):
     return "#" * max(0, min(width, round(share * width)))
 
 
-def phases(recs):
+def _window(mon, lo, hi):
+    """Monitor samples inside a wall-clock window, as (peak MB, mean CPU%)."""
+    inside = [m for m in mon if lo <= (m.get("wall") or 0) <= hi]
+    if not inside:
+        return None, None
+    mem = [m["mem_used"] for m in inside if m.get("mem_used") is not None]
+    cpu = [m["cpu_pct"] for m in inside if m.get("cpu_pct") is not None]
+    return (max(mem) / 1048576 if mem else None,
+            sum(cpu) / len(cpu) if cpu else None)
+
+
+def phases(recs, mon=None):
     rows = [r for r in recs if r.get("kind") == "phase"]
     if not rows:
         return
     total = sum(r.get("secs") or 0 for r in rows)
-    print(f"\n  PHASES                       {total:8.1f}s accounted for")
+    start = next((r.get("wall") for r in recs if r.get("kind") == "start"), None)
+    joined = bool(mon) and start is not None
+    head = f"  PHASES                       {total:8.1f}s accounted for"
+    print("", head + ("      peak MB   cpu%" if joined else ""), sep=chr(10))
     for r in rows:
         secs = r.get("secs") or 0
         share = secs / total if total else 0
         flag = "  <-- " + r["failed"] if r.get("failed") else ""
-        print(f"    {r['name']:<24} {secs:8.2f}s {share * 100:5.1f}%  {_bar(share)}{flag}")
+        # the bar is padded so the joined columns line up under their header
+        line = f"    {r['name']:<24} {secs:8.2f}s {share * 100:5.1f}%  {_bar(share):<28}"
+        if joined:
+            end = start + (r.get("t") or 0)
+            mb, cpu = _window(mon, end - secs, end)
+            line += f" {mb:8.0f}" if mb is not None else "         -"
+            line += f" {cpu:6.0f}" if cpu is not None else "      -"
+        print(line + flag)
 
 
 def memory(recs):
@@ -107,13 +133,20 @@ def summary(recs):
 
 
 def main(argv):
-    if not argv:
+    mon, paths = [], []
+    it = iter(argv)
+    for a in it:
+        if a == "--monitor":
+            mon = load(next(it, ""))
+        else:
+            paths.append(a)
+    if not paths:
         print(__doc__)
         return 2
-    for path in argv:
-        print(f"\n=== {path} ===")
+    for path in paths:
+        print(f"=== {path} ===")
         recs = load(path)
-        phases(recs)
+        phases(recs, mon)
         memory(recs)
         assets(recs)
         summary(recs)
