@@ -542,6 +542,25 @@
       minTileAreaFrac: n <= 8 ? 0.0100 :
         n <= 20 ? 0.0075 :
           0.0055,
+      // Ceiling, and the counterpart to the floor above: no bird is
+      // drawn larger than this share of the collage, however loud it
+      // was. Measured off a real plate rather than chosen - the frame
+      // was showing a goldfinch at 34240 of 320160 px, and that is the
+      // size the panel was asked to treat as the biggest a bird gets.
+      //
+      // This is a per-tile clamp, which the note above tuning() warns
+      // against, and the warning still stands: birds above the ceiling
+      // all render at the ceiling, so the call ratio stops being
+      // readable between them (it was Anna n=398 and Crow n=31 landing
+      // identical that got the old cap removed). The difference is
+      // where it bites. The old cap sat low enough to catch ordinary
+      // loud birds; this one sits at what the largest tile on a normal
+      // plate already measures, so it is a guard against one bird
+      // taking the wall rather than a size every busy bird reaches.
+      // Budget freed by a clamped tile is deliberately not redealt to
+      // the others - the plate just gets a little airier, which is the
+      // quieter of the two ways to be wrong.
+      maxTileAreaFrac: 0.107,
       // Wider clusters for landscape viewports, more so as n grows.
       ellipseAspectBias: 2.1,
     };
@@ -2467,6 +2486,7 @@
     var vpArea = W * H;
     var budget = vpArea * T.packingBudgetFrac;
     var minArea = vpArea * T.minTileAreaFrac;
+    var maxArea = vpArea * T.maxTileAreaFrac;
 
     // Step 1: build tiles + assign each a count-weighted SCORE (not a
     // final area yet). area-from-count uses a sub-linear exponent so
@@ -2497,7 +2517,7 @@
     // at minArea so even a 1-call bird stays legible.
     var sumScore = tiles.reduce(function (a, t) { return a + t.score; }, 0) || 1;
     tiles.forEach(function (t) {
-      t.area = Math.max(minArea, budget * t.score / sumScore);
+      t.area = Math.min(maxArea, Math.max(minArea, budget * t.score / sumScore));
     });
     // After flooring, total may exceed budget; squeeze the over-budget
     // remainder out of the LARGER tiles (the ones above minArea) so
