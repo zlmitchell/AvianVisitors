@@ -30,7 +30,19 @@ def load_display():
     return module
 
 
+def load_shoot():
+    """Import frame/shoot.py by path, the same way and for the same reason.
+    It imports playwright inside shoot() rather than at the top, so this works
+    with no browser installed."""
+    spec = importlib.util.spec_from_file_location("birdframe_shoot", FRAME / "shoot.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 display = load_display()
+shoot = load_shoot()
 
 
 # --- the opening ------------------------------------------------------------
@@ -391,7 +403,6 @@ def test_a_count_change_inside_one_bracket_moves_nothing():
     assert display.signature(a) != display.signature(crossed)
 
 
-
 # --- the singing rule -------------------------------------------------------
 # Both of these guard a mistake that shipped, was rendered, and was only caught
 # by looking at the panel. Like the bracket tests above they read the renderer's
@@ -565,20 +576,15 @@ def test_label_scale_can_be_overridden():
 def test_every_apt_js_rewrite_still_matches():
     """shoot.py refuses to ship a half-tuned frame: if any of these patterns
     stops matching it raises and the panel keeps yesterday's picture. They are
-    regexes against someone else's source file, so they need a guard."""
-    import ast
-    import re as _re
-    src = (FRAME / "shoot.py").read_text(encoding="utf-8")
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.FunctionDef) and n.name == "_make_js_handler")
-    patterns = [pair.elts[0].value for node in ast.walk(fn)
-                if isinstance(node, ast.Tuple)
-                for pair in node.elts
-                if isinstance(pair, ast.Tuple) and len(pair.elts) == 2
-                and isinstance(pair.elts[0], ast.Constant) and isinstance(pair.elts[0].value, str)]
-    assert len(patterns) >= 6, f"only found {len(patterns)} rewrite patterns"
-    for pat in patterns:
-        assert _re.search(pat, APT_JS), f"apt.js no longer matches {pat!r}"
+    regexes against a source file this one does not own, so they need a guard -
+    MARK_SCALE was LABEL_SCALE two commits ago.
+
+    This checks the collage the frame is installed beside. The station a frame
+    screenshots is a different clone and can be older, which no test here can
+    see; that is what the station-collage step in install.sh checks, against
+    this same list."""
+    assert len(shoot.JS_TUNABLES) >= 6, f"only {len(shoot.JS_TUNABLES)} rewrites left"
+    assert shoot.missing_tunables(APT_JS) == []
 
 
 def test_both_render_paths_get_the_same_look_settings():

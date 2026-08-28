@@ -12,6 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 FRAME="$(pwd)"
+REPO="$(dirname "$FRAME")"   # the checkout this frame was installed from
 
 MODE=local            # local | image | birdweather
 ZIP=""
@@ -94,7 +95,7 @@ CONFIG_TXT=/boot/firmware/config.txt
 # A fresh install is unchanged; a re-run (or an upgrade) skips straight to the
 # config and the render instead of spending minutes re-checking apt and pip.
 
-echo "1/5  Enabling SPI + I2C (Inky needs both; SPI with no chip-select)..."
+echo "1/6  Enabling SPI + I2C (Inky needs both; SPI with no chip-select)..."
 if [ "$(sudo raspi-config nonint get_spi 2>/dev/null || echo 1)" = 0 ] \
    && [ "$(sudo raspi-config nonint get_i2c 2>/dev/null || echo 1)" = 0 ]; then
   echo "     SPI + I2C already enabled."
@@ -104,7 +105,7 @@ else
 fi
 grep -q "^dtoverlay=spi0-0cs" "$CONFIG_TXT" || echo "dtoverlay=spi0-0cs" | sudo tee -a "$CONFIG_TXT" >/dev/null
 
-echo "2/5  Installing system packages (build tools to compile spidev, libatlas3-base for numpy)..."
+echo "2/6  Installing system packages (build tools to compile spidev, libatlas3-base for numpy)..."
 APT_PKGS="python3-venv python3-dev build-essential libatlas3-base"
 MISSING_PKGS=""
 for pkg in $APT_PKGS; do
@@ -119,7 +120,7 @@ else
   sudo apt-get install -y $MISSING_PKGS
 fi
 
-echo "3/5  Creating venv and installing Python deps..."
+echo "3/6  Creating venv and installing Python deps..."
 if [ -x .venv/bin/pip ]; then
   echo "     venv already exists, reusing it."
 else
@@ -153,7 +154,7 @@ if [ "$NEEDS_BROWSER" = 1 ]; then
   fi
 fi
 
-echo "4/5  Writing config..."
+echo "4/6  Writing config..."
 CONFIG="$HOME/.birdframe/config.toml"
 if [ -f "$CONFIG" ]; then
   EXISTING="$(sed -n 's/^# birdframe-mode: //p' "$CONFIG" | head -1)"
@@ -175,7 +176,61 @@ fi
 sudo ln -sfn "$FRAME/birdframe-names" /usr/local/bin/birdframe-names
 sudo ln -sfn "$FRAME/birdframe" /usr/local/bin/birdframe
 
-echo "5/5  Installing systemd service + timer..."
+echo "5/6  Checking the station's collage..."
+# Only local mode screenshots someone else's website; the other two render here
+# or fetch a finished PNG, and neither cares what any station serves.
+#
+# A station install and a frame install are two clones of this repository, and
+# only one of them is this one: newinstaller.sh clones the station from upstream
+# into ~/BirdNET-Pi, while the frame is installed from wherever you cloned it.
+# So a frame built against a newer collage than its station serves is the
+# DEFAULT arrangement here, not an edge case - and the frame then screenshots a
+# page carrying none of what it is about to ask for. shoot.py refuses that
+# outright rather than ship a half-tuned plate, which is right, but it finds out
+# at render time: on a Pi, after launching a browser, once every 15 minutes,
+# for as long as nobody reads the log.
+#
+# Ask the question here instead, where the answer costs a line of output, and if
+# the station is behind hand it the collage this frame was built against. Two
+# files, both pure frontend - the collage renderer and its stylesheet.
+#
+# What makes copying into another checkout safe to automate is that none of it
+# is assumed. The copy happens only when the station is actually missing a
+# tunable, what it replaces is backed up, and the result is checked against the
+# same list shoot.py rewrites at capture time. If that list ever outgrows these
+# two files, this fails loudly with the station put back as it was, instead of
+# leaving a frontend half-patched.
+STATION="${BIRDNET_PI_DIR:-$HOME/BirdNET-Pi}"
+STATION_JS="$STATION/avian/frontend/apt.js"
+COLLAGE_FILES="avian/frontend/apt.js avian/frontend/styles.css"
+if [ "$MODE" != local ]; then
+  echo "     nothing to check in $MODE mode."
+elif [ ! -f "$STATION_JS" ]; then
+  echo "     no station checkout here ($STATION); assuming the frame mirrors one on the network."
+elif .venv/bin/python shoot.py --check-frontend "$STATION_JS" 2>/dev/null; then
+  echo "     $STATION already serves a collage this frame can drive."
+else
+  STAMP="$(date +%s)"
+  echo "     $STATION serves an older collage than this frame needs; updating it."
+  for f in $COLLAGE_FILES; do
+    [ -f "$STATION/$f" ] && cp -p "$STATION/$f" "$STATION/$f.bak-$STAMP"
+    cp "$REPO/$f" "$STATION/$f"
+  done
+  if .venv/bin/python shoot.py --check-frontend "$STATION_JS"; then
+    echo "     updated (replaced files backed up alongside as *.bak-$STAMP)."
+    echo "     Note: a station update re-clones from upstream and undoes this."
+    echo "     Re-run this installer afterwards, or merge the frame branch upstream."
+  else
+    echo "     still missing tunables after the copy - putting $STATION back." >&2
+    for f in $COLLAGE_FILES; do
+      [ -f "$STATION/$f.bak-$STAMP" ] && mv "$STATION/$f.bak-$STAMP" "$STATION/$f"
+    done
+    echo "     The frame needs collage files this step does not know to copy." >&2
+    exit 1
+  fi
+fi
+
+echo "6/6  Installing systemd service + timer..."
 # Every mode runs display.py against the config on the standard 15-minute timer;
 # only the config differs. display.py renders inline for local + birdweather and
 # pushes to the panel only when the birds change.

@@ -28,8 +28,6 @@ import sys
 import threading
 import urllib.parse
 
-from playwright.sync_api import TimeoutError as PWTimeout
-from playwright.sync_api import sync_playwright
 
 # --bird-weather resolves cutouts from the local clone first, then falls back to
 # the repo's raw GitHub URLs: a fresh install needs no illustration redeploy,
@@ -170,19 +168,46 @@ def _make_cutout_handler(base, local_dir=None):
     return handler
 
 
+# Every collage tunable the frame rewrites inside the page's apt.js at capture
+# time, as (pattern, replacement template). Named and at module level because
+# three things need the same list and none of them may drift from the others:
+# the capture path rewrites them, install.sh checks a station's frontend against
+# them before pointing a frame at that station, and a test checks this repo's
+# own. A frame is only as tunable as the apt.js it screenshots, and a station
+# serving an older collage than the frame was built against is not a theoretical
+# worry - it is what a BirdNET-Pi install and a frame install on one box give
+# you by default, since they are separate clones. Finding that out at render
+# time costs a wasted render on a Pi that can barely afford one; finding it out
+# at install time costs a line of output.
+JS_TUNABLES = (
+    (r"var xBias = narrow \? 1 : T\.ellipseAspectBias;", "var xBias = {xbias};"),
+    (r"var yBias = narrow \? 1\.7 : 1;", "var yBias = {ybias};"),
+    (r"countExp:\s*[\d.]+,", "countExp: {count_exp},"),
+    (r"var pad = narrow \? Math\.max\(1, COLLAGE_PAD - 1\) : COLLAGE_PAD;", "var pad = {pad};"),
+    (r"var LABEL_MIN_PX = \d+;", "var LABEL_MIN_PX = {label_min_px};"),
+    (r"var MARK_SCALE = [\d.]+;", "var MARK_SCALE = {label_scale};"),
+)
+
+
+def missing_tunables(js):
+    """Which JS_TUNABLES a given apt.js does not carry, as a list of patterns.
+
+    Empty means the frame can drive that frontend. This is the whole contract
+    between the two: everything else the collage does is its own business."""
+    return [pat for pat, _ in JS_TUNABLES if not re.search(pat, js)]
+
+
 def _make_js_handler(xbias, ybias, count_exp, pad, label_min_px, label_scale, auth, misses):
     """Rewrite the collage tunables inside the page's apt.js at capture time."""
+    values = {"xbias": xbias, "ybias": ybias, "count_exp": count_exp, "pad": pad,
+              "label_min_px": int(label_min_px), "label_scale": label_scale}
+
     def handler(route):
         try:
             kw = {"headers": {**route.request.headers, "authorization": auth}} if auth else {}
             js = route.fetch(**kw).text()
-            for pat, repl in ((r"var xBias = narrow \? 1 : T\.ellipseAspectBias;", f"var xBias = {xbias};"),
-                              (r"var yBias = narrow \? 1\.7 : 1;", f"var yBias = {ybias};"),
-                              (r"countExp:\s*[\d.]+,", f"countExp: {count_exp},"),
-                              (r"var pad = narrow \? Math\.max\(1, COLLAGE_PAD - 1\) : COLLAGE_PAD;", f"var pad = {pad};"),
-                              (r"var LABEL_MIN_PX = \d+;", f"var LABEL_MIN_PX = {int(label_min_px)};"),
-                              (r"var MARK_SCALE = [\d.]+;", f"var MARK_SCALE = {label_scale};")):
-                js, n = re.subn(pat, repl, js)
+            for pat, repl in JS_TUNABLES:
+                js, n = re.subn(pat, repl.format(**values), js)
                 if not n:
                     misses.append(pat)
             route.fulfill(status=200, content_type="application/javascript; charset=utf-8", body=js)
@@ -201,6 +226,14 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
           fresh_minutes=30, fade="0", label_scale=1.0):
     pad_side, pad_top, pad_bottom = int(vw * mat), int(vh * mat * 0.92), int(vh * mat)
     auth = "Basic " + base64.b64encode(f"{user}:{password or ''}".encode()).decode() if user else None
+
+    # Imported here rather than at the top so this module can be imported
+    # without a browser installed. --check-frontend answers a question about a
+    # file, and install.sh asks it while deciding what to hand a station; a test
+    # asks it of this repo's own collage. Neither should need playwright, and an
+    # `image`-mode frame does not install it at all.
+    from playwright.sync_api import TimeoutError as PWTimeout
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--force-color-profile=srgb", "--disable-dev-shm-usage"])
@@ -387,7 +420,19 @@ def main():
                     help='drain colour from birds over "<start>-<end>" hours of '
                          'silence; 0 turns fading off')
     ap.add_argument("--timeout", type=int, default=45000)
+    # Answers "could a frame drive this frontend?" without rendering anything,
+    # so install.sh can check a station's collage before it points a frame at
+    # it. Takes the apt.js itself rather than a URL: at install time the file
+    # is on disk and the web server may not be up yet.
+    ap.add_argument("--check-frontend", metavar="APT_JS",
+                    help="report which collage tunables an apt.js is missing, then exit")
     a = ap.parse_args()
+    if a.check_frontend:
+        with open(a.check_frontend, encoding="utf-8", errors="replace") as f:
+            gone = missing_tunables(f.read())
+        for pat in gone:
+            print(f"missing: {pat}", file=sys.stderr)
+        sys.exit(1 if gone else 0)
     if a.bird_weather:
         if not a.zip:
             print("--bird-weather needs --zip", file=sys.stderr)
