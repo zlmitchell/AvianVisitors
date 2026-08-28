@@ -62,6 +62,38 @@ To test a change: edit the host checkout, `perf-sync`, render again. Re-running
 `perf-render` writes `out/<name>.jsonl` and `out/<name>.png`, which land in the
 host checkout through the bind mount. `out/` is gitignored.
 
+## What it found
+
+A ten-bird plate, measured under the cap with the station running. Each row adds
+to the one above it.
+
+| | render slice | decoded bitmap | page | picture |
+|---|---|---|---|---|
+| as it was | 239.3 MB | 17.4 MB | 8.78 MB | — |
+| + cutouts at drawn size | 233.8 MB | 1.9 MB | 4.03 MB | same |
+| + `frame=1` render mode | — | 1.9 MB | 3.32 MB | same |
+| + chromium launch flags | **199.0 MB** | 1.9 MB | 3.32 MB | byte-identical |
+
+The render's own cgroup slice is the number that decides whether this fits on
+the Pi, which has 415MB and a station already holding ~142MB of it. 40MB came
+off it for no change to the plate at all — `ImageChops.difference` returns a
+bbox of `None` between the first and last renders.
+
+Two findings the lab could not have produced on its own, and one it could not
+produce at all:
+
+- **The illustrations were the largest single line item**, not any of the code
+  paths. Sources carried 12.8x the pixels that were painted, worst case 67x.
+  That was fifth on the list of suspects before anything was measured.
+- **`shoot()` was waiting for the wrong thing** — it took the birdless branch on
+  every instrumented run, and captured a collage that happened to arrive during
+  a 250ms sleep.
+- **The 30s poll cannot be measured here.** A render finishes in about eight
+  seconds, so the poll never fires and re-renders read 1.0 either way. It only
+  bites on a box slow enough to have the problem, which is the Pi. This is the
+  clearest case of the fidelity gap below: absence of evidence here is not
+  evidence of absence there.
+
 ## Design notes
 
 **One constrained service, not two.** The station and the frame are separate
