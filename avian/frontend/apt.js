@@ -494,12 +494,29 @@
       // Soft area budget the whole cluster aims to fill, as a
       // fraction of viewport area. Lower = sparser collage with more
       // breathing room (and more headroom for packing efficiency).
-      // Steps down as species count grows so a busy plate doesn't
-      // try to claim the entire viewport.
-      packingBudgetFrac: n <= 4 ? 0.46 :
-        n <= 12 ? 0.40 :
-          n <= 24 ? 0.34 :
-            0.28,
+      //
+      // It falls away at BOTH ends of the range, for opposite reasons.
+      // Above a dozen species it steps down because packing many
+      // shapes needs slack, and a busy plate that claims the whole
+      // viewport drops birds off the edge of it.
+      //
+      // Below four it steps down because a plate is a record of a
+      // day's listening, and one bird given the budget for a flock
+      // gets the whole wall - a lone goldfinch rendered at the same
+      // 0.46 that carries four birds is a poster of a goldfinch, and
+      // reads as a busy day rather than the quiet one it is. Scaling
+      // the budget is the right lever for that and a per-tile cap is
+      // not: every tile moves together, so relative size still tracks
+      // the relative call ratio exactly. Capping tiles instead is what
+      // this file used to do, and it flattened every loud bird to one
+      // size - see the note above this function.
+      packingBudgetFrac: n <= 1 ? 0.24 :
+        n <= 2 ? 0.32 :
+          n <= 3 ? 0.40 :
+            n <= 4 ? 0.46 :
+              n <= 12 ? 0.40 :
+                n <= 24 ? 0.34 :
+                  0.28,
       // Count -> area exponent. ~0.65 keeps the visual hierarchy
       // legible (n=400 reads ~5× bigger than n=30) without the
       // loudest bird drowning everything else.

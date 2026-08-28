@@ -472,6 +472,34 @@ def test_the_singing_rule_stands_clear_of_the_bird_at_every_size():
         assert paper >= fw, f"{cap}px type: rule sits {paper:.2f}px off a {fw:.2f}px silhouette"
 
 
+def test_a_lone_bird_does_not_get_the_budget_for_a_flock():
+    """A plate is a record of a day's listening, so a quiet day has to look
+    quiet. The budget is a share of the viewport split between the birds on it,
+    which means one bird takes all of whatever it is set to - and at the value
+    tuned for a flock that is the entire wall. It has to fall away below four
+    species as well as above twelve.
+
+    Checked on the ladder rather than on a render because scaling the budget is
+    the only lever that may be used for this: it moves every tile together, so
+    relative size still tracks the call ratio. Clamping tiles individually is
+    what apt.js used to do, and it flattened every loud bird to one size."""
+    import re
+    m = re.search(r"packingBudgetFrac:(.+?)ellipseAspectBias", APT_JS, re.S)
+    assert m, "the packing budget ladder is gone from apt.js"
+    steps = [(int(a), float(b)) for a, b in
+             re.findall(r"n <= (\d+) \? ([0-9.]+)", m.group(1))]
+    assert steps, "could not read the ladder"
+    rungs = sorted(steps)
+    assert rungs[0][0] <= 1, (
+        f"the ladder starts at n <= {rungs[0][0]}, so one bird is handed the "
+        f"budget tuned for {rungs[0][0]} of them")
+    one, flock = rungs[0][1], next(v for k, v in rungs if k >= 4)
+    assert one < flock, f"a lone bird gets {one} of the viewport against a flock's {flock}"
+    # and it has to climb, not jump, or two birds would look smaller than one
+    small = [v for k, v in rungs if k <= 4]
+    assert small == sorted(small), f"the ladder is not monotonic below 4: {small}"
+
+
 # --- per-run overrides ------------------------------------------------------
 @pytest.mark.parametrize("pair,key,expected", [
     ("fresh_minutes=0", "fresh_minutes", 0),
