@@ -334,8 +334,8 @@ def shoot(url, out, *, title=None, subtitle=None, vw=600, vh=800, dsf=2,
     # file, and install.sh asks it while deciding what to hand a station; a test
     # asks it of this repo's own collage. Neither should need playwright, and an
     # `image`-mode frame does not install it at all.
-    from playwright.sync_api import TimeoutError as PWTimeout
-    from playwright.sync_api import sync_playwright
+    from cdp import TimeoutError as PWTimeout
+    from cdp import sync_playwright
 
     with sync_playwright() as p:
         mark("playwright.driver")
