@@ -28,6 +28,8 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
+from urllib.error import URLError
 
 from PIL import Image, ImageChops
 
@@ -136,8 +138,19 @@ def loop():
                 # as done and skipped until the birds change again.
                 if render_once(cfg, "changed" if last else "first run"):
                     last = sig
-        except Exception:
-            traceback.print_exc()
+        except Exception as e:
+            # A .local name is mDNS, and a container has no mDNS resolver - the
+            # station is reachable from the Pi and from a desktop and simply is
+            # not a name in here. It is the single most likely way this fails on
+            # a NAS, and urllib's traceback says only "Name or service not
+            # known", so name it.
+            host = urllib.parse.urlsplit(STATION or "").hostname or ""
+            if isinstance(e, URLError) and host.endswith(".local"):
+                print(f"cannot resolve {host}: .local is mDNS and this container "
+                      f"has no resolver for it. Set STATION_URL to the station's "
+                      f"IP address instead.", file=sys.stderr, flush=True)
+            else:
+                traceback.print_exc()
         time.sleep(EVERY)
 
 

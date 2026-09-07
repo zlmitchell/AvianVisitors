@@ -21,6 +21,20 @@ FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 # how large the lettering should be.
 RUN pip install --no-cache-dir --break-system-packages playwright==1.56.0 "Pillow>=10,<12"
 
+# mDNS, so a station called birdnet.local can be reached by that name.
+#
+# Not academic: Docker Desktop forwards a container's DNS to the host resolver,
+# which on a Mac or Windows box already speaks mDNS - so `.local` resolves there
+# and the problem is invisible. On a Linux NAS it does not, the query goes to a
+# unicast nameserver that has never heard of `.local`, and the renderer fails
+# with "Name or service not known".
+#
+# libnss-mdns puts mdns4_minimal into the hosts line ahead of dns, with
+# [NOTFOUND=return] so a real DNS lookup is not delayed by it. It still needs
+# multicast to reach the network, which a bridged container does not get - so
+# this only helps with --network host, and the IP remains the reliable answer.
+RUN apt-get update  && apt-get install -y --no-install-recommends libnss-mdns  && rm -rf /var/lib/apt/lists/*  && sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
+
 # Put the headless shell on PATH under both of its names. This image keeps its
 # browsers in /ms-playwright; frame/cdp.py looks in ~/.cache/ms-playwright and
 # then falls back to `which`. A symlink is all it needs, and shoot.py then runs

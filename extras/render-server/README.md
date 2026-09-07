@@ -71,8 +71,23 @@ On Unraid, add a container with:
 | Port | `8080` → whatever host port you like |
 | Path | `/config` → a folder holding the frame's `config.toml` (read-only) |
 | Path | `/out` → any writable folder |
-| Variable | `STATION_URL` = `http://birdnet.local` (or the station's IP) |
+| Variable | `STATION_URL` = `http://192.168.1.x` — the station's **IP** |
 | Extra Parameters | `--user pwuser --security-opt seccomp=unconfined` |
+
+**Use the IP, not `birdnet.local`,** unless you run with host networking. Give
+the Pi a DHCP reservation so the address does not move.
+
+`.local` is mDNS. The image carries `libnss-mdns` and puts `mdns4_minimal` ahead
+of `dns` in `/etc/nsswitch.conf`, so the name *can* resolve - but mDNS is a
+multicast query, and a bridged container's traffic does not reach the network's
+multicast group. It works only with `--network host` (where the port mapping no
+longer applies and the server is simply on 8080 of the host).
+
+Worth knowing why this is easy to miss: Docker Desktop forwards a container's
+DNS to the host resolver, and a Mac or Windows host already speaks mDNS - so
+`.local` resolves there and the problem is invisible. On a Linux NAS the query
+goes to a unicast nameserver that has never heard of `.local` and the render
+fails with "Name or service not known".
 
 Those last two are not optional. Chromium refuses to run as root without
 `--no-sandbox`, and that flag would have to live in `shoot.py` and follow the
