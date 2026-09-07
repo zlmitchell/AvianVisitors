@@ -27,7 +27,7 @@ import urllib.request
 import metrics
 from datetime import datetime, timedelta
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 try:
     import tomllib
@@ -121,6 +121,13 @@ DEFAULTS = {
     # the opening, by cancelling out the collage's own scale-up - see
     # label_scale(). A positive value overrides that outright.
     "label_scale": 0,
+    # strftime format for a small mark in the corner of the opening, or "" for
+    # none. It stamps the STATION's anchor - the moment the detections it drew
+    # were current - and not the moment the panel was written, because the
+    # failure worth catching is a plate that is old, and a stale plate pushed
+    # today would carry a fresh write-time and tell you nothing. A frame whose
+    # corner says yesterday is a frame you can catch from across the room.
+    "timestamp": "",
 
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
@@ -442,6 +449,45 @@ def label_scale(cfg):
     return min(1.0, reference_scale() / scale) if scale > 0 else 1.0
 
 
+def _stamp(img, fmt, when, opening, aspect):
+    """Write `when` into the bottom-right of the opening, formatted by `fmt`.
+
+    Drawn onto the finished panel image rather than into the page, because
+    mat_and_center splits the screenshot into a title band and a collage band
+    by looking for a blank horizontal run between them. A mark placed in the
+    browser would land inside one of those bands and drag its bounding box out
+    with it - moving the birds to make room for the clock.
+
+    Inside the opening rather than the panel: on a matted frame everything
+    outside that rectangle is behind cardboard.
+    """
+    if not fmt or when is None:
+        return img
+    try:
+        text = when.strftime(fmt)
+    except (ValueError, AttributeError):
+        return img
+    size = max(12, round(img.height * 0.013))
+    hand = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "avian", "frontend", "fonts", "Caveat.ttf")
+    try:
+        font = ImageFont.truetype(hand, size)   # the hand the names are in
+    except (OSError, ValueError):
+        try:
+            font = ImageFont.load_default(size)
+        except TypeError:                       # Pillow older than 10.1
+            font = ImageFont.load_default()
+    ow, oh = opening_size(opening, aspect)
+    inset = round(img.height * 0.012)
+    out = img.copy()
+    draw = ImageDraw.Draw(out)
+    box = draw.textbbox((0, 0), text, font=font)
+    draw.text(((img.width + ow) / 2 - inset - (box[2] - box[0]),
+               (img.height + oh) / 2 - inset - (box[3] - box[1])),
+              text, font=font, fill=(60, 60, 60))
+    return out
+
+
 def mat_and_center(img, mat, opening, aspect=0.75,
                    title_frac=TITLE_H_FRAC, collage_frac=COLLAGE_FRAC, gap_frac=GAP_FRAC,
                    title_position="top"):
@@ -673,6 +719,7 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     state = load_state(cfg["state"])
     sig = None
     species = None
+    anchor = None          # the station's clock, for the corner mark
     if use_signature:
         try:
             species, anchor = fetch_species(cfg, _auth(cfg))
@@ -709,6 +756,7 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     lay = layout_of(cfg)
     img = mat_and_center(img, lay["mat"], lay["opening"], lay["aspect"],
                          lay["title"], lay["collage"], lay["gap"], lay["title_position"])
+    img = _stamp(img, cfg.get("timestamp", ""), anchor, lay["opening"], lay["aspect"])
     mark("mat.and.centre")
     if preview:
         out = quantize_spectra6(img)

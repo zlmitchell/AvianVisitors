@@ -69,6 +69,7 @@ SECTIONS = [
     ("Panel and layout", [
         "rotate", "saturation", "panel", "mat", "opening", "opening_aspect",
         "title_frac", "title_position", "collage_frac", "gap_frac", "label_scale",
+        "timestamp",
     ]),
     ("Refresh cadence", ["quiet_start", "quiet_end", "heal_hours"]),
     ("Paths and timeouts", ["state", "cache", "timeout"]),
@@ -116,6 +117,7 @@ HELP = {
     "collage_frac": "collage width as a fraction of the OPENING's width - this is the thing meant to grow with the opening",
     "gap_frac": "space under the title, as a fraction of the panel",
     "label_scale": "bird-name type size. 0 holds the handwriting at the size the A5 mat gives it, whatever the opening",
+    "timestamp": "strftime format for a small mark in the corner, e.g. %-d %b %H:%M. Empty for none. It stamps when the birds were current, so a frame that has stopped updating says so",
     "quiet_start": "start of the hours the panel stays quiet (0/0 = always refresh on change)",
     "quiet_end": "end of the quiet hours",
     "heal_hours": "force a refresh at least this often, even with nothing changed",
@@ -176,6 +178,7 @@ LABELS = {
     "title_frac": "title height", "title_position": "title sits at",
     "collage_frac": "birds fill", "gap_frac": "space under the title",
     "label_scale": "name size",
+    "timestamp": "corner timestamp",
     "quiet_start": "quiet from", "quiet_end": "quiet until",
     "heal_hours": "redraw at least every",
     "state": "state file", "cache": "working folder", "timeout": "give up after",
