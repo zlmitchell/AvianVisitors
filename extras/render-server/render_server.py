@@ -207,6 +207,31 @@ def main():
     if not os.path.isfile(CONFIG):
         print(explain_missing_config(), file=sys.stderr)
         return 2
+    # Everything the CAPTURE depends on, printed once, so the copy of the
+    # config that lives here can be compared against the Pi's at a glance.
+    #
+    # The two are separate files and nothing keeps them in step: change the mat
+    # on the Pi and this keeps sizing the lettering for the old one, silently,
+    # because label_scale is derived from the opening and applied in the browser.
+    # The rest of the frame's settings - rotate, saturation, the timestamp, the
+    # panel driver - belong to the Pi alone and are not listed, because a
+    # difference in those means nothing.
+    try:
+        cfg = load()
+        print("capture settings from " + CONFIG + ":", flush=True)
+        for key in ("shoot_title", "shoot_subtitle", "shoot_lowercase", "bird_names",
+                    "hours", "fresh_minutes", "fade_hours", "shoot_collage_vh",
+                    "shoot_mat", "shoot_count_exp", "shoot_small_floor",
+                    "shoot_headline_px", "shoot_eyebrow_px",
+                    "opening", "opening_aspect", "collage_frac", "title_frac",
+                    "gap_frac"):
+            print(f"    {key:<20} {cfg.get(key)!r}", flush=True)
+        print(f"    {'-> label_scale':<20} {display.label_scale(cfg):.4f}"
+              "   (the one the Pi has to agree with)", flush=True)
+    except Exception as e:
+        print(f"could not read {CONFIG}: {e}", file=sys.stderr, flush=True)
+        return 2
+
     threading.Thread(target=loop, daemon=True).start()
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("0.0.0.0", PORT), Handler) as srv:
