@@ -46,6 +46,12 @@ PORT = int(os.environ.get("PORT", "8080"))
 # often than it checks would show yesterday's birds for a cycle.
 EVERY = int(os.environ.get("INTERVAL_SECONDS", "300"))
 OUT = os.path.join(OUT_DIR, "frame.png")
+
+# One render at a time, and one place that remembers what was last drawn. The
+# poll loop and a ?force= request can both decide to render, and two chromiums
+# racing to write the same file is not something to find out about later.
+_render_lock = threading.Lock()
+_state = {"last": None}
 # Still a .png: playwright picks the screenshot format from the file extension,
 # so a plain ".tmp" is rejected as an unsupported mime type. Dotted so a
 # directory listing does not offer a half-written frame to anyone browsing it.
@@ -119,7 +125,6 @@ def render_once(cfg, why):
 
 
 def loop():
-    last = None
     while True:
         try:
             cfg = load()
@@ -132,12 +137,13 @@ def loop():
             # picture to serve. Not on a timer otherwise: the plate is a pure
             # function of the birds, so an unchanged signature means an
             # identical PNG and the Pi's gate would ignore it anyway.
-            if sig != last or not os.path.exists(OUT):
+            if sig != _state["last"] or not os.path.exists(OUT):
                 # Only remember the signature once a plate for it is actually
                 # published, so a refused render is retried rather than counted
                 # as done and skipped until the birds change again.
-                if render_once(cfg, "changed" if last else "first run"):
-                    last = sig
+                with _render_lock:
+                    if render_once(cfg, "changed" if _state["last"] else "first run"):
+                        _state["last"] = sig
         except Exception as e:
             # A .local name is mDNS, and a container has no mDNS resolver - the
             # station is reachable from the Pi and from a desktop and simply is
@@ -154,9 +160,54 @@ def loop():
         time.sleep(EVERY)
 
 
+def render_now(why):
+    """Render synchronously. Returns True if a new plate was published.
+
+    Never raises at the caller: a forced render that cannot reach the station,
+    or whose plate fails the ink check, leaves the previous picture in place and
+    the caller serves that. A frame showing the last good plate is a far better
+    answer to a failed refresh than an error page the Pi would treat as a broken
+    fetch and skip anyway.
+    """
+    with _render_lock:
+        try:
+            cfg = load()
+            species, anchor = display.fetch_species(cfg, display._auth(cfg))
+            sig = display.signature(
+                species,
+                display.fresh_slugs(species, anchor, cfg["fresh_minutes"]),
+                display.fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"]))
+            if render_once(cfg, why):
+                _state["last"] = sig
+                return True
+        except Exception:
+            traceback.print_exc()
+    return False
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=OUT_DIR, **k)
+
+    def do_GET(self):
+        # ?force=1 draws the plate before serving it, rather than handing over
+        # whatever the poll loop last happened to make.
+        #
+        # This is what closes the gap between the two halves. The Pi decides for
+        # itself when the birds have changed enough to be worth twelve seconds
+        # of e-ink, and it only fetches the image on a run where it has already
+        # decided to push - so asking for a fresh render at that moment costs
+        # nothing on an idle tick and guarantees the picture matches the birds
+        # the Pi just counted. Without it the two poll independently and the
+        # frame can push a plate drawn before the bird that triggered it.
+        #
+        # It blocks for the length of a render, which is the point, and the
+        # frame's own `timeout` (180s by default) is the bound on it.
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        if query.get("force") and query["force"][0] not in ("0", "false", ""):
+            render_now("forced by " + (self.client_address[0] if self.client_address
+                                       else "?"))
+        return super().do_GET()
 
     def log_message(self, fmt, *a):
         print("http: " + fmt % a, flush=True)

@@ -124,6 +124,29 @@ settings.
 goes stale rather than blank, which is the right failure for a picture on a
 wall. It catches up on the next tick after this comes back.
 
+## Forcing a render
+
+`GET /frame.png?force=1` draws the plate before serving it, instead of handing
+over whatever the poll loop last happened to make. It blocks for the length of a
+render, which is the point.
+
+This is what the frame should use:
+
+```toml
+image_url = "http://<nas>:8080/frame.png?force=1"
+```
+
+The two halves poll independently otherwise, and the Pi can push a plate drawn
+before the bird that triggered the push - right the next cycle, wrong for
+fifteen minutes. It costs nothing on an idle tick, because `display.py` only
+fetches the image on a run where its own change gate has already decided to
+push. The frame's `timeout` (180s) bounds the wait.
+
+A forced render that fails - station unreachable, or a plate that does not pass
+the ink check - leaves the previous picture in place and serves that. A frame
+showing the last good plate is a better answer to a failed refresh than an error
+the Pi would treat as a broken fetch and skip anyway.
+
 ## Cadence
 
 The server re-renders when the species signature changes, not on a timer: the
