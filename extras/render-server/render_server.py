@@ -149,11 +149,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         print("http: " + fmt % a, flush=True)
 
 
+def explain_missing_config():
+    """Say which of the several ways this goes wrong actually happened.
+
+    "No config at /config/config.toml" is true and useless: the mount can be
+    absent, present but empty, pointed at the wrong folder, or pointed at the
+    file itself rather than the folder holding it. Each needs a different fix
+    and they are indistinguishable from the message alone - so look, and say.
+    """
+    d = os.path.dirname(CONFIG) or "/"
+    lines = [f"no frame config at {CONFIG}"]
+    if os.path.isfile(d):
+        lines += [f"  {d} is a FILE, not a directory.",
+                  "  You mounted the config file onto the folder. Either mount the",
+                  f"  folder that contains it at {d}, or mount the file itself at",
+                  f"  {CONFIG}."]
+    elif not os.path.isdir(d):
+        lines += [f"  {d} does not exist - nothing is mounted there.",
+                  "  Add a volume: <a folder holding config.toml>:/config"]
+    else:
+        try:
+            found = sorted(os.listdir(d))
+        except OSError as e:
+            found = [f"<unreadable: {e}>"]
+        if not found:
+            lines += [f"  {d} is mounted but empty.",
+                      "  The folder you mounted does not contain config.toml."]
+        else:
+            lines += [f"  {d} is mounted and contains: {', '.join(found[:10])}",
+                      "  but no file called config.toml. Rename it, or point",
+                      "  FRAME_CONFIG at the one you want."]
+    lines += ["",
+              "  The file is the frame's own config, from the Pi:",
+              "    scp <pi>:~/.birdframe/config.toml <folder>/config.toml",
+              "",
+              "  It is needed, not optional: label_scale and shoot_collage_vh are",
+              "  applied when the picture is captured, so a renderer that guessed",
+              "  at them would size the lettering for a different mat."]
+    return chr(10).join(lines)
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     if not os.path.isfile(CONFIG):
-        print(f"no frame config at {CONFIG} - mount the Pi's ~/.birdframe/config.toml",
-              file=sys.stderr)
+        print(explain_missing_config(), file=sys.stderr)
         return 2
     threading.Thread(target=loop, daemon=True).start()
     socketserver.ThreadingTCPServer.allow_reuse_address = True
