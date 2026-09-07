@@ -1,0 +1,58 @@
+# Build the frame's render server and publish it to ghcr.io.
+#
+# The renderer has to be somewhere that is always on - a frame whose browser
+# lives on someone's desktop goes stale every time that desktop sleeps, which is
+# not a hypothetical: it went three days once, and nothing said so. Publishing
+# an image is what lets it live on a NAS instead.
+name: render-server image
+
+on:
+  push:
+    branches: [main, avian-visitors, frame-full-panel-and-time-marks]
+    paths:
+      - "frame/**"
+      - "avian/frontend/fonts/**"
+      - "extras/render-server/**"
+      - ".dockerignore"
+      - ".github/workflows/render-server-image.yml"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/avian-render-server
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha,format=short
+            type=schedule,pattern={{date 'YYYY.MM.DD'}}
+
+      # Context is the repository root, not extras/render-server: the image
+      # carries frame/ and the collage's label font so it needs no checkout at
+      # runtime. .dockerignore keeps the half-gigabyte of illustrations out -
+      # the renderer fetches cutouts from the station over HTTP, as the browser
+      # does, and never opens those files.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: extras/render-server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

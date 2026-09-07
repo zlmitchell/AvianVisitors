@@ -51,6 +51,46 @@ a renderer that did not read it would size the lettering for a different mat.
 `STATION_URL` overrides `base_url`, which on the Pi's own config says
 `localhost` and means something else from inside a container elsewhere.
 
+## Running it on a NAS (the reason there is an image)
+
+A renderer on a desktop is a frame that goes stale whenever that desktop sleeps.
+This went three days once - the container had been killed when Docker Desktop
+shut down, the Pi's fetches failed, `display.py` correctly kept the last picture,
+and the wall carried on looking like a working frame. Put it somewhere always
+on.
+
+Published to `ghcr.io/<owner>/avian-render-server` by
+`.github/workflows/render-server-image.yml`, and self-contained: it carries
+`frame/` and the label font, so it needs no checkout at runtime.
+
+On Unraid, add a container with:
+
+| | |
+|---|---|
+| Repository | `ghcr.io/zlmitchell/avian-render-server:latest` |
+| Port | `8080` → whatever host port you like |
+| Path | `/config` → a folder holding the frame's `config.toml` (read-only) |
+| Path | `/out` → any writable folder |
+| Variable | `STATION_URL` = `http://birdnet.local` (or the station's IP) |
+| Extra Parameters | `--user pwuser --security-opt seccomp=unconfined` |
+
+Those last two are not optional. Chromium refuses to run as root without
+`--no-sandbox`, and that flag would have to live in `shoot.py` and follow the
+frame everywhere - so the container runs unprivileged instead. Its sandbox then
+needs syscalls Docker's default seccomp profile blocks, and dies with SIGTRAP
+without the second flag. Relaxing seccomp keeps the sandbox rather than
+switching it off.
+
+Then point the Pi at it:
+
+```toml
+image_url = "http://<nas>:8080/frame.png"
+```
+
+If the package is private, the NAS needs a pull credential - a GitHub PAT with
+`read:packages` - or make the package public in the repository's package
+settings.
+
 ## What happens when this host is off
 
 `display.py`'s fetch fails, it logs and keeps the last panel image. The frame

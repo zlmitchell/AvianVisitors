@@ -3,6 +3,12 @@
 # Playwright's own image rather than a Debian base: it ships chromium and the
 # library dependencies already matched to the playwright version, which is the
 # fiddly part and the part that breaks when the two drift.
+#
+# Built from the REPOSITORY ROOT, not this directory, because the image carries
+# frame/ and the collage's label font. That makes it self-contained enough to
+# pull onto a NAS and run with no checkout - which is the point: a renderer that
+# lives on the machine that happens to be someone's desktop is a frame that goes
+# stale every time that desktop sleeps.
 FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 
 # --break-system-packages because noble marks its python externally managed
@@ -25,11 +31,18 @@ RUN exe=$(find /ms-playwright -type f -perm -u+x -name 'chrome-headless-shell' -
     ln -sf "$exe" /usr/local/bin/chrome-headless-shell && \
     ln -sf "$exe" /usr/local/bin/headless_shell
 
-# The server is NOT copied in. It lives in the repository, which is mounted, so
-# there is one copy of it and editing it needs no image rebuild - a trap this
-# fell into once: --force-recreate restarts a container without rebuilding, so a
-# fixed script kept failing with the old error and looked like the fix had not
-# worked.
-ENV FRAME_DIR=/repo/frame OUT_DIR=/out PORT=8080
+# frame/ is the renderer and the shared code; the font is what the bird names
+# are set in, and shoot.py fails the render outright without it. The rest of
+# avian/ is excluded by .dockerignore - the illustrations are half a gigabyte
+# and are fetched from the station at render time, not read from here.
+WORKDIR /app
+COPY frame/ /app/frame/
+COPY avian/frontend/fonts/ /app/avian/frontend/fonts/
+COPY extras/render-server/render_server.py /app/extras/render-server/render_server.py
+
+# A bind mount over /app shadows all of this, which is how development works:
+# same paths, live edits, no rebuild.
+ENV FRAME_DIR=/app/frame OUT_DIR=/out PORT=8080 \
+    FRAME_CONFIG=/config/config.toml
 EXPOSE 8080
-CMD ["python3", "/repo/extras/render-server/render_server.py"]
+CMD ["python3", "/app/extras/render-server/render_server.py"]

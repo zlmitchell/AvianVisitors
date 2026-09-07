@@ -12,7 +12,9 @@
 # recreate the problem it was built to solve.
 services:
   renderer:
-    build: .
+    build:
+      context: ../..
+      dockerfile: extras/render-server/Dockerfile
     container_name: avian-render-server
     restart: unless-stopped
     # Chromium refuses to run as root without --no-sandbox, and adding that flag
@@ -42,7 +44,9 @@ services:
     volumes:
       # The repository, for frame/shoot.py and frame/display.py. Read-only: this
       # renders, it does not install.
-      - ../..:/repo:ro
+      # Shadows the copy baked into the image, so edits take effect without a
+      # rebuild. Drop this line to run exactly what was published.
+      - ../..:/app:ro
       # The frame's own config, so the renderer sizes the lettering for the same
       # mat the Pi is going to cut the picture into.
       - ./config:/config:ro

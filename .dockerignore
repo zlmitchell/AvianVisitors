@@ -1,0 +1,17 @@
+# Build context for extras/render-server, whose context is the repository root
+# because the image has to carry frame/ and the collage's label font.
+#
+# The illustrations are half a gigabyte and the renderer never opens them - it
+# fetches cutouts from the station over HTTP, like the browser does. Everything
+# else here is either history, other people's build output, or the lab.
+.git
+.github
+avian/assets
+extras/perf/out
+extras/render-server/out
+extras/render-server/config
+**/__pycache__
+**/*.pyc
+**/.venv
+**/node_modules
+*.log
