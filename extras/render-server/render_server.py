@@ -31,7 +31,7 @@ import traceback
 
 from PIL import Image, ImageChops
 
-sys.path.insert(0, os.environ.get("FRAME_DIR", "/repo/frame"))
+sys.path.insert(0, os.environ.get("FRAME_DIR", "/app/frame"))
 import display                                    # noqa: E402
 from shoot import shoot                           # noqa: E402
 
