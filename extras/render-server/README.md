@@ -77,11 +77,23 @@ On Unraid, add a container with:
 **Use the IP, not `birdnet.local`,** unless you run with host networking. Give
 the Pi a DHCP reservation so the address does not move.
 
-`.local` is mDNS. The image carries `libnss-mdns` and puts `mdns4_minimal` ahead
-of `dns` in `/etc/nsswitch.conf`, so the name *can* resolve - but mDNS is a
-multicast query, and a bridged container's traffic does not reach the network's
-multicast group. It works only with `--network host` (where the port mapping no
-longer applies and the server is simply on 8080 of the host).
+`.local` is mDNS. The image carries `libnss-mdns` with `mdns4_minimal` ahead of
+`dns` in `/etc/nsswitch.conf`, so the name can resolve - but the module does not
+send the multicast itself. Inspecting it shows it references `/run/avahi-daemon`
+and contains neither `224.0.0.251` nor port `5353`: it asks a running
+avahi-daemon to do the query. That is the useful part, because it means the
+HOST's avahi can do the multicast on the container's behalf, and a bridged
+container never needs multicast of its own.
+
+So, to use `birdnet.local` in bridge mode, add one more volume:
+
+| Path | `/run/avahi-daemon` → `/var/run/avahi-daemon` (read-only) |
+
+Unraid runs avahi-daemon, so the socket is there. `--network host` also works and
+needs no socket, but then the port mapping no longer applies and the server sits
+on 8080 of the host.
+
+The IP remains the answer that needs nothing explained to it.
 
 Worth knowing why this is easy to miss: Docker Desktop forwards a container's
 DNS to the host resolver, and a Mac or Windows host already speaks mDNS - so
