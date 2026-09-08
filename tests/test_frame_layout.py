@@ -507,6 +507,27 @@ def test_a_lone_bird_does_not_get_the_budget_for_a_flock():
     assert small == sorted(small), f"the ladder is not monotonic below 4: {small}"
 
 
+def test_the_corner_stamp_takes_the_anchor_the_station_actually_sends():
+    """fetch_species hands the anchor back as the station wrote it - a string,
+    not a datetime - and _stamp called strftime on it directly. AttributeError
+    went into the except and the mark never appeared. A blank corner looks
+    identical whether the feature is off, misconfigured, or broken, so nothing
+    said anything for a whole day.
+
+    Drawn, not mocked: the point is that ink lands on the image."""
+    blank = Image.new("RGB", (1200, 1600), (250, 250, 246))
+    stamped = display._stamp(blank, "%d %b %H:%M", "2026-09-07 20:52:52", 0.97, 0.75)
+    assert list(stamped.getdata()) != list(blank.getdata()), "no mark was drawn"
+
+    # and the shapes that must stay silent rather than raise mid-render
+    for fmt, when in (("", "2026-09-07 20:52:52"),      # switched off
+                      ("%d %b", None),                  # no anchor this run
+                      ("%d %b", "not a timestamp")):    # station said something odd
+        got = display._stamp(blank, fmt, when, 0.97, 0.75)
+        assert list(got.getdata()) == list(blank.getdata()), (
+            f"{fmt!r}/{when!r} should draw nothing")
+
+
 # --- per-run overrides ------------------------------------------------------
 @pytest.mark.parametrize("pair,key,expected", [
     ("fresh_minutes=0", "fresh_minutes", 0),

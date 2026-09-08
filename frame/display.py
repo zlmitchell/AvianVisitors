@@ -469,11 +469,20 @@ def _stamp(img, fmt, when, opening, aspect):
     Inside the opening rather than the panel: on a matted frame everything
     outside that rectangle is behind cardboard.
     """
-    if not fmt or when is None:
+    if not fmt:
+        return img
+    # `when` arrives as the station's own string - fetch_species hands the
+    # anchor back exactly as the API wrote it - so parse it the way every other
+    # comparison against that clock does. Calling strftime on it directly is
+    # what shipped first, and AttributeError went straight into the except:
+    # the mark simply never appeared, and a corner that is blank looks the same
+    # whether the feature is off, misconfigured, or broken.
+    when = when if hasattr(when, "strftime") else parse_station_ts(when)
+    if when is None:
         return img
     try:
         text = when.strftime(fmt)
-    except (ValueError, AttributeError):
+    except ValueError:              # %-d and friends are not portable
         return img
     size = max(12, round(img.height * 0.013))
     hand = os.path.join(os.path.dirname(os.path.abspath(__file__)),
