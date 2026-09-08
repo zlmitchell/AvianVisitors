@@ -272,6 +272,7 @@ def main():
         print("capture settings from " + CONFIG + ":", flush=True)
         for key in ("shoot_title", "shoot_subtitle", "shoot_lowercase", "bird_names",
                     "hours", "fresh_minutes", "fade_hours", "shoot_collage_vh",
+                    "shoot_cluster_ybias",
                     "shoot_mat", "shoot_count_exp", "shoot_small_floor",
                     "shoot_headline_px", "shoot_eyebrow_px",
                     "opening", "opening_aspect", "collage_frac", "title_frac",

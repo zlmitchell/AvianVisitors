@@ -71,6 +71,14 @@ DEFAULTS = {
     # to panel size in the first place. The rest of the viewport has to hold the
     # title and the stage padding, so this cannot go much past 76.
     "shoot_collage_vh": 52,
+    # How much taller than wide the packer aims to make the flock. 1.2 suits the
+    # A5 mat, whose opening is portrait and whose collage box is taller than it
+    # is wide. A bare panel is the other shape: once the title and its gap are
+    # taken off the top, the collage gets a box only 1.20x tall, and a cluster
+    # packed 1.39x tall hits that ceiling before it reaches the sides - it
+    # stopped at 84% of the opening width, which reads as a mat that is not
+    # there. Measured on a 21-bird plate: 1.2 fills 85%, 1.0 fills 98%.
+    "shoot_cluster_ybias": 1.2,
     "bird_names": True,
     "fresh_minutes": 30,    # outline birds heard this recently; 0 turns the mark off
     # Hours of silence before a bird starts losing its colour. It finishes at
@@ -680,6 +688,7 @@ def obtain_image(cfg, species=None, m=None):
         shoot_birdweather(out, species, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
                           timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"],
                           collage_vh=cfg["shoot_collage_vh"], label_scale=label_scale(cfg),
+                          cluster_ybias=cfg["shoot_cluster_ybias"],
                           metrics=m)
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
@@ -693,6 +702,7 @@ def obtain_image(cfg, species=None, m=None):
               user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
               bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
               fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
+              cluster_ybias=cfg["shoot_cluster_ybias"],
               label_scale=label_scale(cfg), metrics=m)
         return Image.open(out).convert("RGB")
     src = cfg["image_url"] or cfg["image"]
