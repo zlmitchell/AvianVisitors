@@ -623,17 +623,20 @@ def test_every_apt_js_rewrite_still_matches():
 
 
 def test_both_render_paths_get_the_same_look_settings():
-    """obtain_image has two branches - the mic screenshots a live site, the
-    BirdWeather path renders one locally - and they call different functions.
-    A look setting threaded into one and not the other renders differently in
-    the two modes, which is exactly how the bare panel shipped names at twice
-    the size in BirdWeather mode. Compare the keyword sets."""
+    """The mic screenshots a live site and the BirdWeather path renders one
+    locally, through different functions. A look setting threaded into one and
+    not the other renders differently in the two modes, which is exactly how the
+    bare panel shipped names at twice the size in BirdWeather mode. Compare the
+    keyword sets.
+
+    Both calls used to sit in obtain_image; the mic one now lives in capture(),
+    which the off-box render server shares so that it cannot drift either. Scan
+    the module rather than one function, so moving a call again does not quietly
+    stop this from checking anything."""
     import ast
     src = (FRAME / "display.py").read_text(encoding="utf-8")
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.FunctionDef) and n.name == "obtain_image")
     calls = {c.func.id: {k.arg for k in c.keywords}
-             for c in ast.walk(fn)
+             for c in ast.walk(ast.parse(src))
              if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
              and c.func.id in ("shoot", "shoot_birdweather")}
     assert set(calls) == {"shoot", "shoot_birdweather"}, calls

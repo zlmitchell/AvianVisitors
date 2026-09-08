@@ -35,7 +35,6 @@ from PIL import Image, ImageChops
 
 sys.path.insert(0, os.environ.get("FRAME_DIR", "/app/frame"))
 import display                                    # noqa: E402
-from shoot import shoot                           # noqa: E402
 
 CONFIG = os.environ.get("FRAME_CONFIG", "/config/config.toml")
 STATION = os.environ.get("STATION_URL", "")
@@ -89,20 +88,13 @@ def collage_ink(path):
 
 def render_once(cfg, why):
     tmp = PARTIAL
-    # The same call display.py makes on its mic path, field for field - the
-    # layout knobs matter here because label_scale is applied at capture time,
-    # so a renderer that did not read the frame's config would size the
-    # lettering for a different mat.
-    shoot(cfg["base_url"], tmp,
-          title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
-          headline_px=cfg["shoot_headline_px"], eyebrow_px=cfg["shoot_eyebrow_px"],
-          lowercase=cfg["shoot_lowercase"], mat=cfg["shoot_mat"],
-          small_floor=cfg["shoot_small_floor"], count_exp=cfg["shoot_count_exp"],
-          timeout_ms=cfg["timeout"] * 1000, user=cfg["basic_user"],
-          password=cfg["basic_pass"], window_hours=cfg["hours"],
-          bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
-          fade=display.fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
-          label_scale=display.label_scale(cfg))
+    # display.capture() is the one place that turns a frame config into shoot()
+    # arguments, and it is shared with the Pi on purpose. This used to keep its
+    # own copy of that argument list, which is how shoot_cluster_ybias came to
+    # be honoured by the frame and ignored here: the flock went on packing to
+    # the shape of a mat that had been taken off, and nothing failed - it just
+    # looked slightly wrong on a wall.
+    display.capture(cfg, tmp)
     # A render can succeed and still be wrong. The browser reports the
     # illustrations loaded, and if the screenshot is taken before they are
     # painted the plate comes out with its lettering and no birds - which the

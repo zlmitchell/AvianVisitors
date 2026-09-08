@@ -678,6 +678,33 @@ def frame_url(url, bird_names, fresh_minutes=None, fade=None):
 
 
 # --- run --------------------------------------------------------------------
+def capture(cfg, out, m=None):
+    """Screenshot the station's collage into `out`, as this config asks for it.
+
+    The one place that turns a frame config into shoot() arguments. It exists
+    because there are two callers and there used to be two copies: this one, and
+    the render server that draws the plate off-box. A capture setting added to
+    one and not the other does not fail - it renders, with the old value, and
+    the only sign is a picture that looks slightly wrong on a wall. That is
+    exactly how shoot_cluster_ybias went in: the frame was updated, the render
+    server was not, and the flock kept packing to the shape of a mat that had
+    been taken off.
+    """
+    from shoot import shoot
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    shoot(cfg["base_url"], out, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
+          headline_px=cfg["shoot_headline_px"], eyebrow_px=cfg["shoot_eyebrow_px"],
+          lowercase=cfg["shoot_lowercase"], mat=cfg["shoot_mat"],
+          small_floor=cfg["shoot_small_floor"], count_exp=cfg["shoot_count_exp"],
+          timeout_ms=cfg["timeout"] * 1000,
+          user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
+          bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
+          fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
+          cluster_ybias=cfg["shoot_cluster_ybias"],
+          label_scale=label_scale(cfg), metrics=m)
+    return out
+
+
 def obtain_image(cfg, species=None, m=None):
     if cfg.get("species_source") == "birdweather":
         from shoot import shoot_birdweather
@@ -692,18 +719,8 @@ def obtain_image(cfg, species=None, m=None):
                           metrics=m)
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
-        from shoot import shoot
         out = os.path.join(os.path.expanduser(cfg["cache"]), "shot.png")
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        shoot(cfg["base_url"], out, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
-              headline_px=cfg["shoot_headline_px"], eyebrow_px=cfg["shoot_eyebrow_px"],
-              lowercase=cfg["shoot_lowercase"], mat=cfg["shoot_mat"],
-              small_floor=cfg["shoot_small_floor"], count_exp=cfg["shoot_count_exp"], timeout_ms=cfg["timeout"] * 1000,
-              user=cfg["basic_user"], password=cfg["basic_pass"], window_hours=cfg["hours"],
-              bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
-              fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
-              cluster_ybias=cfg["shoot_cluster_ybias"],
-              label_scale=label_scale(cfg), metrics=m)
+        capture(cfg, out, m)
         return Image.open(out).convert("RGB")
     src = cfg["image_url"] or cfg["image"]
     if not src:
