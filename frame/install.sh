@@ -235,6 +235,29 @@ else
     exit 1
   fi
 fi
+# The station's Caddy publishes an explicit list of API entry points and
+# answers 404 for anything else under avian/api - so a frame.php copied into
+# the checkout is invisible until it is on that list. A station whose
+# Caddyfile came from a checkout that predates the frame card has to be told.
+# One line, validated before it is installed, and only ever added, never
+# removed: a station update regenerates the file and picks the entry up from
+# its own scripts/update_caddyfile.sh.
+CADDYFILE=/etc/caddy/Caddyfile
+if [ -f "$STATION_JS" ] && [ -f "$CADDYFILE" ] && command -v caddy >/dev/null 2>&1 \
+   && sudo grep -q 'not path /avian/api/.*maintenance.php' "$CADDYFILE" \
+   && ! sudo grep -q 'not path /avian/api/.*/avian/api/frame.php' "$CADDYFILE"; then
+  CADDY_TMP="$(sudo mktemp /etc/caddy/.Caddyfile.XXXXXX)"
+  sudo sed 's|\(not path /avian/api/.*\)/avian/api/maintenance.php|\1/avian/api/frame.php /avian/api/maintenance.php|' "$CADDYFILE" \
+    | sudo tee "$CADDY_TMP" >/dev/null
+  if sudo caddy validate --config "$CADDY_TMP" --adapter caddyfile >/dev/null 2>&1; then
+    sudo install -o root -g root -m 0644 "$CADDY_TMP" "$CADDYFILE"
+    sudo systemctl reload-or-restart caddy
+    echo "     told the station's Caddy about avian/api/frame.php."
+  else
+    echo "     could not add avian/api/frame.php to $CADDYFILE; the station page will not show the frame card." >&2
+  fi
+  sudo rm -f "$CADDY_TMP"
+fi
 
 echo "6/6  Installing systemd service + timer..."
 # Every mode runs display.py against the config on the standard 15-minute timer;

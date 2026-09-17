@@ -8327,9 +8327,16 @@
     // report "another render is in progress", so the button waits it out.
     var framePoll = null;
     function frameMessage(state) {
-      if (state.state === 'running') return 'drawing...';
+      if (state.state === 'running') return 'drawing...' + (state.detail ? ' ' + state.detail : '');
       if (state.state === 'busy') return 'the frame is rendering on its own; wait';
-      return state.detail ? 'last refresh: ' + state.detail : '';
+      if (!state.detail) return '';
+      // `when` is the journal's short-iso stamp; a browser that cannot parse
+      // it just gets the outcome without a time.
+      var at = state.when ? new Date(state.when) : null;
+      var clock = at && !isNaN(at.getTime())
+        ? ' at ' + at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase()
+        : '';
+      return 'last refresh: ' + state.detail + clock;
     }
     function paintFrame(state) {
       var box = adminBody.querySelector('#frameTools');

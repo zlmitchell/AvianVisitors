@@ -111,6 +111,7 @@ foreach ([
     'generate.php' => ['action' => 'start'],
     'archive.php' => [],
     'maintenance.php' => [],
+    'frame.php' => [],
 ] as $endpoint => $query) {
     $body = endpoint_json("$api/$endpoint", $localPost, $query);
     check(is_array($body) && ($body['error'] ?? '') === 'missing action header', "$endpoint wires the action-header gate");

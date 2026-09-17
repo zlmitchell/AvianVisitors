@@ -27,25 +27,26 @@ case "${1:-}" in
   is-active)
     unit=${2%.service}
     if [ -e "$root/active.$unit" ]; then echo active; else echo inactive; fi ;;
-  show)
-    case "$4" in   # show <unit> -p <prop> --value
-      InvocationID) echo abc123 ;;
-      ExecMainStartTimestamp) echo 'Wed 2026-09-16 19:24:25 EDT' ;;
-      ExecMainExitTimestamp) echo 'Wed 2026-09-16 19:26:23 EDT' ;;
-    esac ;;
   start) shift; while [ "$#" -gt 1 ]; do shift; done; echo "$1" >>"$root/started" ;;
+  show) [ "$4" = InvocationID ] && echo abc123 ;;
 esac
 exit 0
 STUB
 cat >/usr/local/bin/journalctl <<'STUB'
 #!/usr/bin/env bash
-printf '20 species, 0 singing, 11 fading\npanel updated\n'
+# The last line the render printed: under the unit when idle, under the
+# current invocation while running.
+case "$1" in
+  -u) printf '2026-09-16T20:09:10-0400 birdnet python[391818]: panel updated\n' ;;
+  _SYSTEMD_INVOCATION_ID=abc123) printf '2026-09-16T20:11:02-0400 birdnet python[391900]: 20 species, 1 singing, 9 fading\n' ;;
+esac
 STUB
 chmod 0755 /usr/local/bin/systemctl /usr/local/bin/journalctl
 
 out=$(/usr/local/sbin/avian-frame-control)
 grep -q '"state":"idle"' <<<"$out" || fail "initial status was not idle: $out"
 grep -q '"detail":"panel updated"' <<<"$out" || fail "last outcome was not read from the journal: $out"
+grep -q '"when":"2026-09-16T20:09:10-0400"' <<<"$out" || fail "outcome time was not read from the journal: $out"
 grep -q '"installed":true' <<<"$out" || fail "status did not say installed: $out"
 
 out=$(/usr/local/sbin/avian-frame-control refresh)
@@ -63,8 +64,10 @@ grep -q 'already rendering' "$test_root/out" || fail "wrong refusal: $(cat "$tes
 rm -f "$test_root/active.birdframe"
 
 touch "$test_root/active.birdframe-refresh"
-/usr/local/sbin/avian-frame-control | grep -q '"state":"running"' \
-  || fail 'a running refresh was not reported as running'
+out=$(/usr/local/sbin/avian-frame-control)
+grep -q '"state":"running"' <<<"$out" || fail "a running refresh was not reported as running: $out"
+grep -q '"detail":"20 species, 1 singing, 9 fading"' <<<"$out" \
+  || fail "a running refresh reported a line that was not its own: $out"
 if /usr/local/sbin/avian-frame-control refresh >/dev/null 2>&1; then
   fail 'a second refresh was started over the first'
 fi

@@ -50,24 +50,30 @@ unit_active() {
   [ "$state" = active ] || [ "$state" = activating ]
 }
 
-unit_prop() {
-  systemctl show "$1" -p "$2" --value 2>/dev/null || true
-}
-
-# The last line display.py printed in the most recent forced run: "panel
-# updated", "could not get image: ...", "another render is in progress;
-# skipping". That line is the outcome, and it is the honest one - the unit's
-# exit status is 0 for all three, because a skipped render is not an error.
+# The last line display.py printed under the refresh unit: "panel updated",
+# "could not get image: ...", "another render is in progress; skipping". That
+# line is the outcome, and it is the honest one - the unit's exit status is 0
+# for all three, because a skipped render is not an error.
+#
+# While a refresh runs, only its own lines count - the invocation is known
+# then, and without that filter the page shows the previous run's "panel
+# updated" for the first half-minute of the next one, before it has said
+# anything. Once it has finished the invocation is forgotten, which is exactly
+# when the page asks, so the last line under the unit is read instead.
+# _COMM=python keeps systemd's own "Starting"/"Finished" lines out of both.
 last_outcome() {
-  local iid
-  iid=$(unit_prop "$refresh_unit" InvocationID)
-  [ -n "$iid" ] || return 0
-  journalctl "_SYSTEMD_INVOCATION_ID=$iid" -o cat --no-pager 2>/dev/null \
-    | grep -v '^$' | tail -n 1 || true
+  local running=$1 iid
+  if [ "$running" = 1 ]; then
+    iid=$(systemctl show "$refresh_unit" -p InvocationID --value 2>/dev/null || true)
+    [ -n "$iid" ] || return 0
+    journalctl "_SYSTEMD_INVOCATION_ID=$iid" _COMM=python -n 1 -o short-iso --no-pager 2>/dev/null || true
+  else
+    journalctl -u "$refresh_unit" _COMM=python -n 1 -o short-iso --no-pager 2>/dev/null || true
+  fi
 }
 
 print_status() {
-  local state=idle detail started finished
+  local state=idle line detail='' when=''
   if unit_active "$refresh_unit"; then
     state=running
   elif unit_active "$timer_unit"; then
@@ -75,12 +81,14 @@ print_status() {
     # would only report "another render is in progress". Say so first.
     state=busy
   fi
-  detail=$(last_outcome)
-  started=$(unit_prop "$refresh_unit" ExecMainStartTimestamp)
-  finished=$(unit_prop "$refresh_unit" ExecMainExitTimestamp)
-  printf '{"ok":true,"installed":true,"version":%s,"state":"%s","detail":"%s","started":"%s","finished":"%s"}\n' \
-    "$CONTROL_VERSION" "$state" "$(json_escape "$detail")" \
-    "$(json_escape "$started")" "$(json_escape "$finished")"
+  line=$(last_outcome "$([ "$state" = running ] && echo 1 || echo 0)")
+  if [ -n "$line" ]; then
+    # short-iso: "2026-09-16T20:09:10-0400 host python[pid]: message"
+    when=${line%% *}
+    detail=${line#*]: }
+  fi
+  printf '{"ok":true,"installed":true,"version":%s,"state":"%s","detail":"%s","when":"%s"}\n' \
+    "$CONTROL_VERSION" "$state" "$(json_escape "$detail")" "$(json_escape "$when")"
 }
 
 start_refresh() {
