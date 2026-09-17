@@ -86,6 +86,35 @@ def collage_ink(path):
     return on / (lower.width * lower.height) * 100
 
 
+def reap_orphans():
+    """Collect dead processes nobody else will, if this happens to be PID 1.
+
+    The image runs this under tini, which does the reaping, so normally this
+    returns at once. It exists for the container that was started some other
+    way - `docker run --entrypoint python3`, an old template, a compose file
+    that set its own command - because the failure it prevents is slow and
+    silent: the browser's helper processes outlive the browser by a moment,
+    get re-parented to PID 1, exit, and stay in the process table until PID 1
+    calls wait() for them. Two per render, nine days to the pid limit, and then
+    every request fails with "can't start new thread" while the log looks fine.
+
+    Only ever called between renders, when no child of ours is alive, so
+    waitpid(-1) cannot steal a status that subprocess is still waiting on.
+    """
+    if os.getpid() != 1:
+        return 0
+    n = 0
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if pid == 0:
+            break
+        n += 1
+    return n
+
+
 def render_once(cfg, why):
     tmp = PARTIAL
     # display.capture() is the one place that turns a frame config into shoot()
@@ -94,7 +123,10 @@ def render_once(cfg, why):
     # be honoured by the frame and ignored here: the flock went on packing to
     # the shape of a mat that had been taken off, and nothing failed - it just
     # looked slightly wrong on a wall.
-    display.capture(cfg, tmp)
+    try:
+        display.capture(cfg, tmp)
+    finally:
+        reap_orphans()
     # A render can succeed and still be wrong. The browser reports the
     # illustrations loaded, and if the screenshot is taken before they are
     # painted the plate comes out with its lettering and no birds - which the
@@ -276,6 +308,9 @@ def main():
         print(f"could not read {CONFIG}: {e}", file=sys.stderr, flush=True)
         return 2
 
+    if os.getpid() == 1:
+        print("running as PID 1 with no init: reaping the browser's orphans myself. "
+              "The published image runs under tini; prefer that.", flush=True)
     threading.Thread(target=loop, daemon=True).start()
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("0.0.0.0", PORT), Handler) as srv:

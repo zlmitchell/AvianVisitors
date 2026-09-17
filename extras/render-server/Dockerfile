@@ -33,7 +33,18 @@ RUN pip install --no-cache-dir --break-system-packages playwright==1.56.0 "Pillo
 # [NOTFOUND=return] so a real DNS lookup is not delayed by it. It still needs
 # multicast to reach the network, which a bridged container does not get - so
 # this only helps with --network host, and the IP remains the reliable answer.
-RUN apt-get update  && apt-get install -y --no-install-recommends libnss-mdns  && rm -rf /var/lib/apt/lists/*  && sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
+#
+# tini, because the server is otherwise PID 1 and PID 1 has a job it does not
+# do. Every render ends by terminating the browser, and the browser's helper
+# processes outlive it by a moment, get re-parented to PID 1, exit, and wait
+# there to be reaped. Python never reaps children it did not start, so each
+# render left two zombie headless_shell entries in the process table - which is
+# harmless until the container's pid limit, and at a render every fifteen
+# minutes that took nine days: then every new connection failed with "can't
+# start new thread", and the Pi saw "Remote end closed connection without
+# response" until someone restarted the container. Measured, not inferred:
+# `ps -eo stat,comm | grep -c ^Z` climbed by two per forced render.
+RUN apt-get update  && apt-get install -y --no-install-recommends libnss-mdns tini  && rm -rf /var/lib/apt/lists/*  && sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns/' /etc/nsswitch.conf
 
 # Put the headless shell on PATH under both of its names. This image keeps its
 # browsers in /ms-playwright; frame/cdp.py looks in ~/.cache/ms-playwright and
@@ -59,4 +70,5 @@ COPY extras/render-server/render_server.py /app/extras/render-server/render_serv
 ENV FRAME_DIR=/app/frame OUT_DIR=/out PORT=8080 \
     FRAME_CONFIG=/config/config.toml
 EXPOSE 8080
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python3", "/app/extras/render-server/render_server.py"]

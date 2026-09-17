@@ -147,6 +147,18 @@ the ink check - leaves the previous picture in place and serves that. A frame
 showing the last good plate is a better answer to a failed refresh than an error
 the Pi would treat as a broken fetch and skip anyway.
 
+## If it stops answering after days
+
+The symptom, from the Pi's side, is `could not get image: Remote end closed
+connection without response` on every tick; from the container's log it is
+`RuntimeError: can't start new thread` on every request. Images before
+2026.09.16 had no init process: the server was PID 1, each render's browser
+left two dead helper processes behind for PID 1 to collect, and Python never
+did. Two zombies per render, and at a render every fifteen minutes the
+container's pid limit arrives in about nine days. Restarting the container
+clears it; pulling the current image fixes it - the server now runs under
+`tini`, and reaps the orphans itself if it is ever started without it.
+
 ## Cadence
 
 The server re-renders when the species signature changes, not on a timer: the
