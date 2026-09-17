@@ -74,6 +74,10 @@ On a **first** install SPI is not up yet, so it reboots and the timer draws the 
 
 A re-run also skips whatever is already done: SPI, the apt packages, the venv, the Python deps and the Chromium download are each checked before being installed, so an upgrade goes more or less straight to the render.
 
+### Redrawing it from the station's page
+
+When the frame is installed on the same Pi as the station, the station's **Tools** page (menu → tools) gets a **frame** card with a **refresh** button that redraws the panel now, whether or not the birds have changed. The installer puts it there: it copies the small API behind the card into the station checkout, installs a root-owned helper (`/usr/local/sbin/avian-frame-control`) the web server may call with exactly `status` or `refresh` and nothing else, and a second unit, `birdframe-refresh.service`, which is the timer's unit with `--force`. The card reports what the last refresh did (`panel updated`, or the reason it could not) and waits its turn if the timer's own render is already running - the two share a lock, so they never push into the panel at the same time. A station without a frame does not show the card at all.
+
 ## 3. Changing settings
 
 `birdframe` opens every setting on one screen, over ssh, and refreshes the panel

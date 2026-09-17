@@ -191,38 +191,44 @@ echo "5/6  Checking the station's collage..."
 # for as long as nobody reads the log.
 #
 # Ask the question here instead, where the answer costs a line of output, and if
-# the station is behind hand it the collage this frame was built against. Two
-# files, both pure frontend - the collage renderer and its stylesheet.
+# the station is behind hand it the files this frame was built against: the
+# collage renderer and its stylesheet, the cutout endpoint it asks for sized
+# images from, and the small API behind the "redraw the frame" card on the
+# station's Tools page - which is why this runs in every mode and not only
+# local: a frame fed by a render server still wants that button.
 #
 # What makes copying into another checkout safe to automate is that none of it
-# is assumed. The copy happens only when the station is actually missing a
-# tunable, what it replaces is backed up, and the result is checked against the
-# same list shoot.py rewrites at capture time. If that list ever outgrows these
-# two files, this fails loudly with the station put back as it was, instead of
-# leaving a frontend half-patched.
+# is assumed. The copy happens only when the station is actually missing
+# something - a tunable, or the frame card - what it replaces is backed up, and
+# the result is checked against the same list shoot.py rewrites at capture
+# time. If that list ever outgrows these files, this fails loudly with the
+# station put back as it was, instead of leaving a frontend half-patched.
 STATION="${BIRDNET_PI_DIR:-$HOME/BirdNET-Pi}"
 STATION_JS="$STATION/avian/frontend/apt.js"
-COLLAGE_FILES="avian/frontend/apt.js avian/frontend/styles.css"
-if [ "$MODE" != local ]; then
-  echo "     nothing to check in $MODE mode."
-elif [ ! -f "$STATION_JS" ]; then
+STATION_FILES="avian/frontend/apt.js avian/frontend/styles.css avian/api/cutout.php avian/api/frame.php"
+station_is_current() {
+  .venv/bin/python shoot.py --check-frontend "$STATION_JS" 2>/dev/null \
+    && grep -q 'avian/api/frame.php' "$STATION_JS" \
+    && [ -f "$STATION/avian/api/frame.php" ]
+}
+if [ ! -f "$STATION_JS" ]; then
   echo "     no station checkout here ($STATION); assuming the frame mirrors one on the network."
-elif .venv/bin/python shoot.py --check-frontend "$STATION_JS" 2>/dev/null; then
+elif station_is_current; then
   echo "     $STATION already serves a collage this frame can drive."
 else
   STAMP="$(date +%s)"
   echo "     $STATION serves an older collage than this frame needs; updating it."
-  for f in $COLLAGE_FILES; do
+  for f in $STATION_FILES; do
     [ -f "$STATION/$f" ] && cp -p "$STATION/$f" "$STATION/$f.bak-$STAMP"
     cp "$REPO/$f" "$STATION/$f"
   done
-  if .venv/bin/python shoot.py --check-frontend "$STATION_JS"; then
+  if station_is_current; then
     echo "     updated (replaced files backed up alongside as *.bak-$STAMP)."
     echo "     Note: a station update re-clones from upstream and undoes this."
     echo "     Re-run this installer afterwards, or merge the frame branch upstream."
   else
     echo "     still missing tunables after the copy - putting $STATION back." >&2
-    for f in $COLLAGE_FILES; do
+    for f in $STATION_FILES; do
       [ -f "$STATION/$f.bak-$STAMP" ] && mv "$STATION/$f.bak-$STAMP" "$STATION/$f"
     done
     echo "     The frame needs collage files this step does not know to copy." >&2
@@ -234,13 +240,39 @@ echo "6/6  Installing systemd service + timer..."
 # Every mode runs display.py against the config on the standard 15-minute timer;
 # only the config differs. display.py renders inline for local + birdweather and
 # pushes to the panel only when the birds change.
-sed "s|/home/monalisa/AvianVisitors/frame|$FRAME|g; s|/home/monalisa|$HOME|g; s|User=monalisa|User=$USER|" \
-  systemd/birdframe.service | sudo tee /etc/systemd/system/birdframe.service >/dev/null
+UNIT_PATHS="s|/home/monalisa/AvianVisitors/frame|$FRAME|g; s|/home/monalisa|$HOME|g; s|User=monalisa|User=$USER|"
+sed "$UNIT_PATHS" systemd/birdframe.service | sudo tee /etc/systemd/system/birdframe.service >/dev/null
+# The same unit with --force, for the "redraw the frame" card on the station's
+# Tools page. A separate unit rather than an argument to the timer's, because
+# systemctl start takes none: the web server's helper starts this one, and the
+# render lock in display.py keeps it from overlapping the timer's run.
+sed "$UNIT_PATHS" systemd/birdframe.service \
+  | sed 's|^Description=.*|Description=AvianVisitors e-ink frame refresh (forced, from the station page)|; s|^ExecStart=.*|& --force|' \
+  | sudo tee /etc/systemd/system/birdframe-refresh.service >/dev/null
 # BirdWeather's remote-ZIP eBird fallback reads its key from the unit environment.
 if [ "$MODE" = birdweather ] && [ -n "$EBIRD_KEY" ]; then
-  echo "Environment=EBIRD_API_KEY=$EBIRD_KEY" | sudo tee -a /etc/systemd/system/birdframe.service >/dev/null
+  for u in birdframe birdframe-refresh; do
+    echo "Environment=EBIRD_API_KEY=$EBIRD_KEY" | sudo tee -a "/etc/systemd/system/$u.service" >/dev/null
+  done
 fi
 sudo cp systemd/birdframe.timer /etc/systemd/system/birdframe.timer
+# What the station's web server may ask of the frame: a root-owned helper that
+# takes exactly `status` or `refresh`, and a sudo rule that names those two
+# and nothing else. This is the shape the station's own Tools actions take
+# (scripts/*_control.sh, /etc/sudoers.d/020_avian-admin); its own file so a
+# station security refresh, which rewrites that one, leaves this alone.
+sudo install -o root -g root -m 0755 frame_control.sh /usr/local/sbin/avian-frame-control
+WEB_USER=caddy
+getent passwd "$WEB_USER" >/dev/null 2>&1 || WEB_USER=www-data
+SUDOERS_TMP="$(sudo mktemp /etc/sudoers.d/.021_avian-frame.XXXXXX)"
+printf '# The station page may ask the e-ink frame to redraw, through its root-owned helper.\n%s ALL=(root) NOPASSWD: /usr/local/sbin/avian-frame-control status, /usr/local/sbin/avian-frame-control refresh\n' "$WEB_USER" \
+  | sudo tee "$SUDOERS_TMP" >/dev/null
+if sudo visudo -cf "$SUDOERS_TMP" >/dev/null; then
+  sudo install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/021_avian-frame
+else
+  echo "     the sudoers rule for the frame did not validate; the station page will not be able to refresh the frame." >&2
+fi
+sudo rm -f "$SUDOERS_TMP"
 sudo systemctl daemon-reload
 sudo systemctl enable birdframe.timer
 # restart, not `enable --now`: on a re-run the timer is already active and

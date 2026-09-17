@@ -7814,6 +7814,22 @@
     });
     html += '</div>';
 
+    // The e-ink frame is optional and comes from its own checkout, so the
+    // card is drawn hidden and shown only once frame.php says one is here.
+    // A refresh is the one thing the page can ask of it: redraw the panel
+    // now, whether or not the birds have changed since the last run.
+    html += '<div id="frameTools" hidden>'
+      + '<h2 class="admin-section-head">frame</h2>'
+      + '<div class="admin-actions-grid">'
+      + '<div class="admin-action deploy frame-card" id="frameCard" aria-busy="false">'
+      + '<button type="button" class="run" data-frame-refresh>refresh</button>'
+      + '<h4>redraw the frame</h4>'
+      + '<p>push the panel now, even if the birds have not changed. takes a minute or two</p>'
+      + '<span class="state" aria-live="polite"></span>'
+      + '</div>'
+      + '</div>'
+      + '</div>';
+
     html += '<h2 class="admin-section-head">update</h2>';
     html += '<div class="admin-actions-grid">';
     // The block is the button. A separate control below it was a second thing
@@ -8304,6 +8320,65 @@
       });
     });
     loadMaintenance();
+
+    // Frame status follows the maintenance shape: GET is the state, POST
+    // starts the work, and the page polls while the unit runs. "busy" is the
+    // timer's own render holding the lock - a refresh started then would only
+    // report "another render is in progress", so the button waits it out.
+    var framePoll = null;
+    function frameMessage(state) {
+      if (state.state === 'running') return 'drawing...';
+      if (state.state === 'busy') return 'the frame is rendering on its own; wait';
+      return state.detail ? 'last refresh: ' + state.detail : '';
+    }
+    function paintFrame(state) {
+      var box = adminBody.querySelector('#frameTools');
+      if (!box) return;
+      if (!state || !state.installed) { box.hidden = true; return; }
+      box.hidden = false;
+      var card = box.querySelector('#frameCard');
+      var button = box.querySelector('[data-frame-refresh]');
+      var out = box.querySelector('.state');
+      var waiting = state.state === 'running' || state.state === 'busy';
+      card.setAttribute('aria-busy', state.state === 'running' ? 'true' : 'false');
+      button.disabled = waiting;
+      out.textContent = frameMessage(state);
+      clearTimeout(framePoll);
+      if (waiting) framePoll = setTimeout(loadFrame, 2000);
+    }
+    function loadFrame() {
+      return fetch('./avian/api/frame.php', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (body) {
+            if (!response.ok || !body.ok) throw new Error(body.error || 'frame unavailable');
+            paintFrame(body);
+          });
+        }).catch(function () { paintFrame(null); });
+    }
+    adminBody.querySelectorAll('[data-frame-refresh]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var card = button.closest('.frame-card');
+        var out = card && card.querySelector('.state');
+        button.disabled = true;
+        if (card) card.setAttribute('aria-busy', 'true');
+        if (out) out.textContent = 'asking...';
+        fetch('./avian/api/frame.php', {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+          body: JSON.stringify({ action: 'refresh' }),
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (body) {
+            if (!response.ok || !body.ok) throw new Error(body.error || 'frame unavailable');
+            paintFrame(body);
+          });
+        }).catch(function (error) {
+          button.disabled = false;
+          if (card) card.setAttribute('aria-busy', 'false');
+          if (out) out.textContent = sudoBlocked(error.message) ? SUDO_HINT : (error.message || 'frame unavailable');
+        });
+      });
+    });
+    loadFrame();
   }
 
   // Initial load: if URL has a sci hash, jump to atlas, highlight, and

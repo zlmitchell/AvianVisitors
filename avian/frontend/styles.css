@@ -2601,8 +2601,8 @@ body.postcard-open { overflow: hidden; }
     margin-top: 10px; font: 10.5px ui-monospace, Menlo, monospace;
     color: var(--ink-soft); white-space: pre-wrap;
   }
-  .maintenance-card[aria-busy="true"] { opacity: 0.72; }
-  .maintenance-card .state:not(:empty) {
+  .maintenance-card[aria-busy="true"], .frame-card[aria-busy="true"] { opacity: 0.72; }
+  .maintenance-card .state:not(:empty), .frame-card .state:not(:empty) {
     display: block; margin-top: 8px;
     color: var(--ink-soft); font: 9px/1.35 ui-monospace, Menlo, monospace;
   }
