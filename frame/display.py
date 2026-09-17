@@ -43,8 +43,9 @@ SPECTRA6 = [(236, 234, 223), (26, 26, 28), (165, 60, 56),
 
 DEFAULTS = {
     "base_url": "http://birdnet.local",
-    "species_source": "",   # "" = the recent API at base_url; "birdweather" = BirdWeather near a ZIP
-    "zip": "",              # BirdWeather ZIP / postal code (with species_source = "birdweather")
+    "species_source": "",   # "" = the recent API; "birdweather" = one station or a ZIP
+    "zip": "",              # BirdWeather ZIP / postal code (use one locator only)
+    "bw_station_id": "",    # public BirdWeather station ID (use instead of zip)
     "bw_days": 7,           # BirdWeather lookback window, in days
     "bw_country": "us",     # geocoder country for the ZIP
     # The window shown on the frame, and the thing the fade below is drawn
@@ -256,7 +257,7 @@ def fade_steps(species, anchor, fade_hours, window_hours, steps=FADE_STEPS):
     return out
 
 
-def signature(species, fresh=frozenset(), fade=None):
+def signature(species, fresh=frozenset(), fade=None, scope=""):
     """What has to change before the panel is worth its twelve seconds: the
     species on it, their count bracket, whether each is wearing the fresh
     outline, and how faded each is.
@@ -267,23 +268,54 @@ def signature(species, fresh=frozenset(), fade=None):
     that changes a pixel; a detection that moves neither is not worth a redraw.
     The count is bracketed for the same reason, and the renderer sizes its tiles
     off the same brackets, so a refresh driven by a mark redraws the identical
-    plate with only that mark changed - no bird moves."""
+    plate with only that mark changed - no bird moves.
+
+    `scope` names the BirdWeather source (station or ZIP) so that switching
+    sources redraws even when the two happen to list the same birds."""
     fade = fade or {}
     items = []
     for s in species:
         slug = slugify(s["sci"])
         items.append((slug, _bucket(int(s.get("n") or 1)), slug in fresh, fade.get(slug, 0)))
-    return hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest()[:16]
+    material = [scope, sorted(items)] if scope else sorted(items)
+    return hashlib.sha256(json.dumps(material).encode()).hexdigest()[:16]
+
+
+def birdweather_locator(cfg):
+    """Return (kind, value) for the one configured BirdWeather source."""
+    station = cfg.get("bw_station_id")
+    has_station = station not in (None, "", 0)
+    zip_code = cfg.get("zip")
+    has_zip = isinstance(zip_code, str) and bool(zip_code.strip())
+    if has_station and has_zip:
+        raise ValueError("BirdWeather config must use either bw_station_id or zip, not both")
+    if has_station:
+        import birdweather
+        return "station", birdweather.station_id(station)
+    if has_zip:
+        return "zip", zip_code.strip()
+    raise ValueError("BirdWeather config needs bw_station_id or zip")
+
+
+def birdweather_signature_scope(cfg):
+    kind, value = birdweather_locator(cfg)
+    if kind == "station":
+        return f"birdweather:station:{value}:days:{cfg['bw_days']}"
+    return f"birdweather:zip:{cfg['bw_country']}:{value}:days:{cfg['bw_days']}"
 
 
 def fetch_species(cfg, auth=None):
     """(species, anchor) for the signature and the render: the BirdNET-Pi
-    recent API by default, or BirdWeather's recent detections near a ZIP when
-    species_source = "birdweather". BirdWeather reports no per-species
-    last_seen, so it has no anchor and no bird is ever outlined there."""
+    recent API by default, or BirdWeather detections from one station or near
+    a ZIP when species_source = "birdweather". BirdWeather reports no
+    per-species last_seen, so it has no anchor and no bird is ever outlined
+    there."""
     if cfg.get("species_source") == "birdweather":
         import birdweather
-        return birdweather.species_for_zip(cfg["zip"], country=cfg["bw_country"], days=cfg["bw_days"]), None
+        kind, value = birdweather_locator(cfg)
+        if kind == "station":
+            return birdweather.species_for_station(value, days=cfg["bw_days"]), None
+        return birdweather.species_for_zip(value, country=cfg["bw_country"], days=cfg["bw_days"]), None
     return fetch_recent(cfg["base_url"], cfg["hours"], cfg["timeout"], auth)
 
 
@@ -761,7 +793,8 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
             species, anchor = fetch_species(cfg, _auth(cfg))
             fresh = fresh_slugs(species, anchor, cfg["fresh_minutes"])
             fading = fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"])
-            sig = signature(species, fresh, fading)
+            scope = birdweather_signature_scope(cfg) if cfg.get("species_source") == "birdweather" else ""
+            sig = signature(species, fresh, fading, scope)
             # What the renderer is about to draw, in the journal. Without this
             # the only way to tell an outline that is off from one that simply
             # has no bird to sit on is to go and look at the panel.

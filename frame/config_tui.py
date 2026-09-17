@@ -58,7 +58,7 @@ DEFAULTS = display.DEFAULTS
 SECTIONS = [
     ("Where the collage comes from", [
         "species_source", "base_url", "shoot", "image", "image_url",
-        "zip", "bw_days", "bw_country", "hours",
+        "zip", "bw_station_id", "bw_days", "bw_country", "hours",
     ]),
     ("Titles and look", [
         "shoot_title", "shoot_subtitle", "bird_names", "shoot_lowercase",
@@ -92,6 +92,7 @@ HELP = {
     "image": "read a PNG a sibling process drops here, instead of rendering",
     "image_url": "or fetch a ready-made frame PNG from here",
     "zip": "postal code BirdWeather mode reads its birds near",
+    "bw_station_id": "one public BirdWeather station to follow instead of a ZIP; the number at the end of its page URL",
     "bw_days": "BirdWeather lookback window, in days",
     "bw_country": "geocoder country for the ZIP",
     "hours": "detection window shown on the frame. Twice the birds is roughly half the area each, so widen this with the opening, not on its own",
@@ -167,6 +168,7 @@ LABELS = {
     "species_source": "species feed", "base_url": "bird mic address",
     "shoot": "draw the collage here", "image": "read a PNG from",
     "image_url": "fetch a PNG from", "zip": "ZIP / postal code",
+    "bw_station_id": "BirdWeather station",
     "bw_days": "BirdWeather lookback", "bw_country": "country for the ZIP",
     "hours": "show birds from the last",
     "shoot_title": "title", "shoot_subtitle": "subtitle",
@@ -237,8 +239,10 @@ def shadow_reason(key, values):
     nowhere to look. Everything here is a rule obtain_image() or the renderer
     already enforces - this only says so out loud."""
     source = mode_of(values)
-    if key in ("zip", "bw_days", "bw_country") and source != "birdweather":
+    if key in ("zip", "bw_station_id", "bw_days", "bw_country") and source != "birdweather":
         return "only read when the birds come from BirdWeather"
+    if key == "zip" and source == "birdweather" and values.get("bw_station_id"):
+        return "ignored: bw_station_id names the source"
     if key in ("image_url", "image") and source != "image":
         return ("never reached: the birds come from BirdWeather"
                 if source == "birdweather" else
@@ -441,12 +445,15 @@ def preset_name(values):
 # every default, and every paragraph explaining one - comes from
 # config.example.toml, which install.sh used to restate in three heredocs that
 # had already drifted apart from each other and from DEFAULTS.
-def init_changes(mode, zip_code="", image_url=""):
+def init_changes(mode, zip_code="", image_url="", station_id=""):
     """The handful of settings a mode actually decides. `local` decides none:
-    it is what the reference file already describes."""
+    it is what the reference file already describes. BirdWeather has one
+    locator: a station if given, else a ZIP."""
     if mode == "local":
         return {}
     if mode == "birdweather":
+        if station_id:
+            return {"species_source": "birdweather", "bw_station_id": str(station_id)}
         return {"species_source": "birdweather", "zip": zip_code}
     if mode == "image":
         parts = urllib.parse.urlsplit(image_url)
@@ -455,7 +462,7 @@ def init_changes(mode, zip_code="", image_url=""):
     raise ValueError(f"unknown mode {mode!r}")
 
 
-def init_config(path, mode, zip_code="", image_url=""):
+def init_config(path, mode, zip_code="", image_url="", station_id=""):
     """Write a fresh config for `mode`, from the reference file.
 
     The installed config becomes config.example.toml with that mode's values
@@ -466,7 +473,7 @@ def init_config(path, mode, zip_code="", image_url=""):
         text = f.read()
     # install.sh reads this marker back on a re-run to refuse a mode switch.
     text = f"# birdframe-mode: {mode}\n" + text
-    changes = init_changes(mode, zip_code, image_url)
+    changes = init_changes(mode, zip_code, image_url, station_id)
     for key, value in changes.items():
         validate(key, value)
     text = apply_edits(text, changes)
@@ -1015,6 +1022,7 @@ def main(argv=None):
     ap.add_argument("--init", metavar="MODE", choices=("local", "image", "birdweather"),
                     help="write a fresh config for MODE, for install.sh")
     ap.add_argument("--zip", dest="zip_code", default="", help="with --init birdweather")
+    ap.add_argument("--station-id", default="", help="with --init birdweather, instead of --zip")
     ap.add_argument("--image-url", default="", help="with --init image")
     ap.add_argument("--get", metavar="KEY",
                     help="print what the file sets KEY to, or nothing if it does not")
@@ -1027,7 +1035,7 @@ def main(argv=None):
             print(f"{path} already exists", file=sys.stderr)
             return 1
         try:
-            init_config(path, args.init, args.zip_code, args.image_url)
+            init_config(path, args.init, args.zip_code, args.image_url, args.station_id)
         except ValueError as exc:
             print(exc, file=sys.stderr)
             return 2

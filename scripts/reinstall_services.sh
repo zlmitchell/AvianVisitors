@@ -16,11 +16,18 @@ readonly SECURITY_HELPER='/usr/local/sbin/avian-security-refresh'
 readonly CADDY_HELPER='/usr/local/sbin/avian-caddy-refresh'
 readonly WEBROOT_HELPER='/usr/local/sbin/avian-link-webroot'
 
+refresh_mode=full
 case "$#" in
   0) ;;
-  1) [ "$1" = --legacy-migration ] \
-    || { echo 'Usage: avian-service-refresh [--legacy-migration]' >&2; exit 64; } ;;
-  *) echo 'Usage: avian-service-refresh [--legacy-migration]' >&2; exit 64 ;;
+  1)
+    case "$1" in
+      --legacy-migration) ;;
+      --audio-policy) refresh_mode=audio-policy ;;
+      --helper-bootstrap) refresh_mode='helper-bootstrap' ;;
+      *) echo 'Usage: avian-service-refresh [--legacy-migration|--audio-policy|--helper-bootstrap]' >&2; exit 64 ;;
+    esac
+    ;;
+  *) echo 'Usage: avian-service-refresh [--legacy-migration|--audio-policy|--helper-bootstrap]' >&2; exit 64 ;;
 esac
 
 die() {
@@ -39,7 +46,7 @@ safe_root_helper() {
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
   safe_root_helper "$FIXED_HELPER" \
     || die "root-owned service refresher is missing or unsafe: $FIXED_HELPER"
-  exec sudo "$FIXED_HELPER"
+  exec sudo "$FIXED_HELPER" "$@"
 fi
 
 [ "$(readlink -f "$0")" = "$FIXED_HELPER" ] \
@@ -80,6 +87,75 @@ conf_value() {
     }
   ' "$file" 2>/dev/null || true
 }
+
+apply_livestream_policy() {
+  local livestream_dropin_dir livestream_dropin_mode livestream_dropin_owner
+  local livestream_dropin_path livestream_dropin_temp recording_card rtsp_stream
+  local recording_user
+
+  [ -r "$CONFIG_FILE" ] || die 'BirdNET-Pi configuration was not found'
+  # A direct ALSA PCM cannot be shared reliably between the recorder and the
+  # optional live stream. Keep recording authoritative, and give existing
+  # installs the same restart policy used by a new install.
+  livestream_dropin_dir=/etc/systemd/system/livestream.service.d
+  if [ -L "$livestream_dropin_dir" ] \
+    || { [ -e "$livestream_dropin_dir" ] && [ ! -d "$livestream_dropin_dir" ]; }; then
+    die "live stream drop-in path is unsafe: $livestream_dropin_dir"
+  fi
+  [ -d "$livestream_dropin_dir" ] \
+    || install -d -o root -g root -m 0755 "$livestream_dropin_dir"
+  livestream_dropin_owner=$(stat -c '%u:%g' "$livestream_dropin_dir")
+  livestream_dropin_mode=$(stat -c '%a' "$livestream_dropin_dir")
+  if [ "$livestream_dropin_owner" != 0:0 ] \
+    || (( (8#$livestream_dropin_mode & 0022) != 0 )); then
+    die "live stream drop-in directory is unsafe: $livestream_dropin_dir"
+  fi
+  livestream_dropin_path=$livestream_dropin_dir/10-avian-visitors-restart.conf
+  if { [ -e "$livestream_dropin_path" ] || [ -L "$livestream_dropin_path" ]; } \
+    && { [ ! -f "$livestream_dropin_path" ] \
+      || [ -L "$livestream_dropin_path" ] \
+      || [ "$(stat -c '%u:%g' "$livestream_dropin_path")" != 0:0 ]; }; then
+    die "live stream drop-in file is unsafe: $livestream_dropin_path"
+  fi
+  livestream_dropin_temp=$(mktemp "$livestream_dropin_dir/.avian-visitors.XXXXXX")
+  printf '%s\n' \
+    '[Service]' \
+    'Restart=always' \
+    'ExecCondition=/usr/local/bin/livestream.sh --check' \
+    >"$livestream_dropin_temp"
+  chown root:root "$livestream_dropin_temp"
+  chmod 0644 "$livestream_dropin_temp"
+  mv -f "$livestream_dropin_temp" "$livestream_dropin_path"
+
+  systemctl daemon-reload
+  recording_card=$(conf_value "$CONFIG_FILE" REC_CARD)
+  rtsp_stream=$(conf_value "$CONFIG_FILE" RTSP_STREAM)
+  case "${rtsp_stream}:${recording_card}" in
+    :hw:*|:plughw:*)
+      systemctl stop livestream.service
+      printf 'Live stream policy: %s is reserved for bird recording; the live stream was stopped.\n' \
+        "$recording_card"
+      recording_user=$(conf_value "$CONFIG_FILE" BIRDNET_USER)
+      [[ "$recording_user" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] \
+        || die 'BirdNET-Pi user is invalid'
+      getent passwd "$recording_user" >/dev/null \
+        || die 'BirdNET-Pi user does not exist'
+      if pgrep -u "$recording_user" -x pulseaudio >/dev/null 2>&1; then
+        printf 'Warning: PulseAudio is still running for %s and may still own the direct ALSA device. Bird recording is not yet confirmed recovered. Reboot the station, then check birdnet_recording.service. Stop PulseAudio manually only after confirming that no other audio service needs it.\n' \
+          "$recording_user" >&2
+      fi
+      ;;
+    *)
+      printf '%s\n' 'Live stream policy: shared audio or RTSP remains available.'
+      ;;
+  esac
+}
+
+if [ "$refresh_mode" = audio-policy ]; then
+  apply_livestream_policy
+  echo 'AvianVisitors live stream policy refreshed.'
+  exit 0
+fi
 
 [ -r "$CONFIG_FILE" ] || die 'BirdNET-Pi configuration was not found'
 station_user=$(conf_value "$CONFIG_FILE" BIRDNET_USER)
@@ -162,6 +238,7 @@ helper_sources=(
   scripts/admin_control.sh
   scripts/link_webroot.sh
   scripts/update_caddyfile.sh
+  scripts/educators_control.sh
 )
 helper_targets=(
   /usr/local/sbin/avian-update-control
@@ -172,6 +249,7 @@ helper_targets=(
   /usr/local/sbin/avian-admin-control
   /usr/local/sbin/avian-link-webroot
   /usr/local/sbin/avian-caddy-refresh
+  /usr/local/sbin/avian-educators
 )
 
 for helper_source in "${helper_sources[@]}"; do
@@ -205,6 +283,15 @@ for index in "${!helper_sources[@]}"; do
     "$stage_dir/$(basename "${helper_sources[$index]}")" \
     "${helper_targets[$index]}"
 done
+
+# A pre-Educators refresher installs this release's security helper before it
+# knows about the newly added helper target. The security helper may re-enter
+# this verified installer under the inherited update lock for this one narrow
+# completion pass.
+if [ "$refresh_mode" = helper-bootstrap ]; then
+  echo 'AvianVisitors privileged helpers refreshed.'
+  exit 0
+fi
 
 # The security helper owns the sudoers policy and targeted checkout modes. It
 # validates the replacement policy before retiring the inherited broad rule.

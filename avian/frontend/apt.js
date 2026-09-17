@@ -1,17 +1,26 @@
 (function () {
   var PLACEHOLDER = [{ "sci": "Calypte anna", "com": "Anna's Hummingbird", "featured": true }, { "sci": "Passer domesticus", "com": "House Sparrow" }, { "sci": "Haemorhous mexicanus", "com": "House Finch" }, { "sci": "Turdus migratorius", "com": "American Robin" }, { "sci": "Zenaida macroura", "com": "Mourning Dove" }, { "sci": "Spinus psaltria", "com": "Lesser Goldfinch" }, { "sci": "Zonotrichia leucophrys", "com": "White-crowned Sparrow" }, { "sci": "Aphelocoma californica", "com": "California Scrub-Jay" }, { "sci": "Mimus polyglottos", "com": "Northern Mockingbird" }, { "sci": "Sayornis nigricans", "com": "Black Phoebe" }, { "sci": "Larus occidentalis", "com": "Western Gull" }, { "sci": "Corvus brachyrhynchos", "com": "American Crow" }];
-  // Bumped whenever the offline sketch build changes, so the browser
-  // doesn't keep a stale cache after we regenerate the sketches.
+  // Library-wide revision for a full offline sketch rebuild. One-species
+  // corrections use ART_REVISIONS below.
   var SKETCH_VERSION = 'r12'; // r12: 84 eastern NA birds (PR #23) refined + re-cut. r11: full library restyle: every species
   // re-rendered (perched + flight) with clean cutouts.
-  // Cache-bust for /api/img - bump whenever a bird gets re-rendered via
-  // /api/regen or whenever you need every CF DC to drop its cached copy.
+  // Cache-bust for /avian/api/cutout.php. Bump only when every CF DC must
+  // drop the full image library.
   // Cloudflare keys on the full URL incl. query, so bumping this is
-  // equivalent to a global cache purge for /api/img. (caches.default
-  // .delete() in the worker only affects ONE colo at a time, so a
-  // versioned URL is the only reliable way to invalidate everywhere.)
+  // equivalent to a global cache purge for /avian/api/cutout.php.
+  // caches.default.delete() in the worker only affects one colo at a time,
+  // so a versioned URL is the only reliable way to invalidate everywhere.
   var IMG_VERSION = 'r12'; // r12: 84 eastern NA birds (PR #23) refined + re-cut. r11: full library restyle: every species re-rendered
   // with clean cutouts, so drop every cached copy.
+  // Keep table and one-off art revisions separate from the library-wide
+  // versions above. A corrected species should not evict every bird image.
+  var TABLE_VERSION = 'r13';
+  var ART_REVISIONS = {
+    'aphelocoma-woodhouseii': 'anatomy-1'
+  };
+  function artRevision(sci, fallback) {
+    return ART_REVISIONS[slugify(String(sci || ''))] || fallback;
+  }
 
   // ---- Sliding pill helper ----
   // Each segmented control has a single .seg-pill element that we move via
@@ -61,7 +70,7 @@
         if (btns[i].getAttribute('aria-current') === 'true') { cur = i; break; }
       }
       btns[(cur + 1) % btns.length].click();
-    });
+    }, true);
   }
 
   // ---- Slider ----
@@ -77,13 +86,46 @@
   var EMPTY_WINDOW_COPY = 'no detections heard in this window';
   var staticHead = document.querySelector('.static-head');
   var staticTitle = document.getElementById('staticTitle');
-  function setTitleForView(i) {
-    var next = VIEW_TITLES[i];
-    if (!staticTitle || staticTitle.textContent === next) return;
+  function applySiteName(value) {
+    var name = typeof value === 'string' ? value.trim() : '';
+    if (!name) name = 'BirdNET-Pi';
+    document.querySelectorAll('[data-site-name]').forEach(function (element) {
+      element.textContent = name;
+    });
+    document.title = name;
+    return name;
+  }
+  function titleForView(i) {
+    if (i === 0 && educatorScopeRouteActive()) {
+      return 'Avian Visitors';
+    }
+    return VIEW_TITLES[i];
+  }
+  var titleSwapTimer = 0;
+  var titleSwapGeneration = 0;
+  function setTitleForView(i, options) {
+    options = options || {};
+    var next = titleForView(i);
+    var generation = ++titleSwapGeneration;
+    if (titleSwapTimer) {
+      clearTimeout(titleSwapTimer);
+      titleSwapTimer = 0;
+    }
+    if (!staticTitle || staticTitle.textContent === next) {
+      if (staticHead) staticHead.classList.remove('swap-out');
+      return;
+    }
+    if (options.immediate) {
+      staticTitle.textContent = next;
+      if (staticHead) staticHead.classList.remove('swap-out');
+      return;
+    }
     // Fade out -> swap text -> fade in. The opacity transition is 240ms;
-    // we swap at ~half that so the eye doesn't catch the text change.
+    // we swap at ~half that so the eye does not catch the text change.
     staticHead.classList.add('swap-out');
-    setTimeout(function () {
+    titleSwapTimer = setTimeout(function () {
+      if (generation !== titleSwapGeneration) return;
+      titleSwapTimer = 0;
       staticTitle.textContent = next;
       // Force reflow before removing class so the transition restarts.
       void staticHead.offsetWidth;
@@ -133,7 +175,7 @@
   btns.forEach(function (b) { b.addEventListener('click', function () { go(+b.dataset.i); }); });
   // Paint the restored sheet immediately. Pre-seeding the title avoids the
   // normal cross-view title transition during the initial page load.
-  if (staticTitle) staticTitle.textContent = VIEW_TITLES[currentView];
+  if (staticTitle) staticTitle.textContent = titleForView(currentView);
   go(currentView, { persist: false });
 
   // The admin overlay's back link is intentionally stronger than ordinary
@@ -197,6 +239,591 @@
   // can be invalidated by bumping the prefix.
   function readLS(k, fallback) { try { return localStorage.getItem(k) || fallback; } catch (e) { return fallback; } }
   function writeLS(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
+  function removeLS(k) { try { localStorage.removeItem(k); } catch (e) { } }
+
+  // Educator capture and folder scopes are browser-local selections. The
+  // server may also apply the active capture automatically when no explicit
+  // scope is sent. Keep the preference and the effective dataset scope
+  // separate so an automatic response never becomes a saved preference.
+  var EDUCATOR_SCOPE_KEY = 'bird:educatorScope:v1';
+  var EDUCATOR_SCOPE_PARAM = 'edu';
+  var AUTOMATIC_EDUCATOR_SCOPE_ID = 'active';
+  var educatorScopeGeneration = 0;
+  var educatorScopesAuthorized = false;
+  var educatorScopeShared = false;
+  var educatorScopeBlocked = false;
+  var educatorAdminRouteFocus = false;
+  var deferredEducatorScope = null;
+  var explicitEducatorScope = null;
+  var effectiveEducatorScope = null;
+  var educatorDataLoading = false;
+  var realtimePollingReady = false;
+  var educatorScopeRetry = null;
+  var educatorScopeRequestAttempt = 0;
+  var educatorScopeCompletedAttempt = 0;
+  var EDUCATOR_SCOPE_RETRY_MS = 1400;
+  function validEducatorId(value) {
+    return typeof value === 'string' && /^[cf]_[a-f0-9]{32}$/.test(value);
+  }
+  function validEducatorScopeKey(value) {
+    return value === AUTOMATIC_EDUCATOR_SCOPE_ID || validEducatorId(value);
+  }
+  function normalizeEducatorScope(value) {
+    if (!value || typeof value !== 'object') return null;
+    var automatic = !!value.automatic;
+    var entityId = automatic && validEducatorId(value.id) ? value.id
+      : (automatic && validEducatorId(value.entity_id) ? value.entity_id : '');
+    var id = automatic ? AUTOMATIC_EDUCATOR_SCOPE_ID
+      : (validEducatorId(value.id) ? value.id : '');
+    if (!id) return null;
+    return {
+      id: id,
+      entity_id: entityId,
+      kind: id.indexOf('f_') === 0 ? 'folder' : 'capture',
+      label: typeof value.label === 'string' ? value.label.trim().slice(0, 80) : '',
+      automatic: automatic,
+      revision: Number.isFinite(+value.revision) ? +value.revision : 0,
+      state_key: typeof value.state_key === 'string' && /^[a-f0-9]{24}$/.test(value.state_key)
+        ? value.state_key : '',
+      state_revision: Number.isFinite(+value.state_revision) ? +value.state_revision : 0,
+      status: typeof value.status === 'string' ? value.status : '',
+    };
+  }
+  function loadEducatorScope() {
+    var raw = readLS(EDUCATOR_SCOPE_KEY, '');
+    if (!raw) return null;
+    try {
+      var scope = normalizeEducatorScope(JSON.parse(raw));
+      return scope && validEducatorId(scope.id) ? scope : null;
+    } catch (e) { return null; }
+  }
+  function educatorScopeUrlState() {
+    try {
+      var values = new URLSearchParams(location.search).getAll(EDUCATOR_SCOPE_PARAM);
+      if (!values.length) return { present: false, valid: false, scope: null };
+      var id = values.length === 1 ? values[0] : '';
+      return {
+        present: true,
+        valid: validEducatorId(id),
+        scope: validEducatorId(id) ? normalizeEducatorScope({ id: id }) : null,
+      };
+    } catch (e) { return { present: true, valid: false, scope: null }; }
+  }
+  function syncEducatorScopeUrl(scope) {
+    if (!window.history || typeof history.replaceState !== 'function') return false;
+    var id = scope && !scope.automatic && validEducatorId(scope.id) ? scope.id : '';
+    try {
+      var url = new URL(location.href);
+      var values = url.searchParams.getAll(EDUCATOR_SCOPE_PARAM);
+      var prior = values[0] || '';
+      if ((id && prior === id && values.length === 1) || (!id && !values.length)) return false;
+      if (id) url.searchParams.set(EDUCATOR_SCOPE_PARAM, id);
+      else url.searchParams.delete(EDUCATOR_SCOPE_PARAM);
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+      return true;
+    } catch (e) { return false; }
+  }
+  function educatorScopeId() {
+    return effectiveEducatorScope && effectiveEducatorScope.id || '';
+  }
+  function educatorScopeRouteActive() {
+    return !!educatorScopeId() || educatorScopeBlocked;
+  }
+  function educatorRequestScopeId() {
+    if (explicitEducatorScope) return explicitEducatorScope.id;
+    return effectiveEducatorScope && effectiveEducatorScope.automatic
+      ? AUTOMATIC_EDUCATOR_SCOPE_ID : '';
+  }
+  function educatorScopeRequest() {
+    return {
+      attempt: ++educatorScopeRequestAttempt,
+      scopeId: educatorRequestScopeId(),
+      generation: educatorScopeGeneration,
+      revision: effectiveEducatorScope && Number.isFinite(+effectiveEducatorScope.revision)
+        ? +effectiveEducatorScope.revision : null,
+      stateKey: effectiveEducatorScope && effectiveEducatorScope.state_key || '',
+      stateRevision: effectiveEducatorScope && Number.isFinite(+effectiveEducatorScope.state_revision)
+        ? +effectiveEducatorScope.state_revision : null,
+    };
+  }
+  function educatorScopeFromPayload(payload, requestScopeId) {
+    if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'educator_scope')) return undefined;
+    if (payload.educator_scope === null) return null;
+    var raw = payload.educator_scope;
+    if (raw && typeof raw === 'object' && !raw.id && validEducatorId(requestScopeId)) {
+      raw = Object.assign({}, raw, { id: requestScopeId });
+    }
+    return normalizeEducatorScope(raw);
+  }
+  function appendEducatorScope(url, scopeId) {
+    scopeId = scopeId === undefined ? educatorScopeId() : scopeId;
+    if (!validEducatorScopeKey(scopeId)) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + 'edu=' + encodeURIComponent(scopeId);
+  }
+  function birdApiUrl(action, params, scopeId) {
+    var url = './avian/api/birdnet-api.php?action=' + encodeURIComponent(action);
+    Object.keys(params || {}).forEach(function (key) {
+      var value = params[key];
+      if (value === undefined || value === null || value === '') return;
+      url += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(value);
+    });
+    return appendEducatorScope(url, scopeId);
+  }
+  function mediaApiUrl(endpoint, params, scopeId) {
+    var url = './avian/api/' + endpoint + '.php';
+    Object.keys(params || {}).forEach(function (key) {
+      var value = params[key];
+      if (value === undefined || value === null || value === '') return;
+      url += (url.indexOf('?') === -1 ? '?' : '&') + encodeURIComponent(key) + '=' + encodeURIComponent(value);
+    });
+    return appendEducatorScope(url, scopeId);
+  }
+  function educatorDetectionId(value) {
+    var id = Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+  function educatorScopeLabel(scope) {
+    if (!scope) return '';
+    if (scope.label) return scope.label;
+    return scope.kind === 'folder' ? 'Saved folder' : 'Listening period';
+  }
+  function educatorSpeciesCacheAllowed(scopeId) {
+    return !validEducatorScopeKey(scopeId);
+  }
+  function scrubEducatorScopeSurface(scopeId) {
+    // A delayed #sci route can otherwise reopen a card from the hidden old
+    // Atlas after the private scope is gone. Cancel that route first.
+    if (validEducatorId(scopeId) && typeof readHash === 'function' && readHash()) clearSciHash();
+    scrubPrivateEducatorPostcard();
+  }
+  function privateEducatorCardCurrent(card) {
+    var scopeId = card && card.dataset && card.dataset.edu || '';
+    if (!validEducatorId(scopeId)) return true;
+    var generation = Number(card.dataset.eduGeneration);
+    return (educatorScopesAuthorized || educatorScopeShared) && scopeId === educatorScopeId()
+      && Number.isSafeInteger(generation) && generation === educatorScopeGeneration;
+  }
+  function syncEducatorScopePill(options) {
+    options = options || {};
+    var scoped = educatorScopeRouteActive();
+    document.body.classList.toggle('educator-scoped', scoped);
+    var back = document.getElementById('returnToEducators');
+    if (back) back.hidden = !scoped;
+    if (typeof currentView === 'number') {
+      setTitleForView(currentView, { immediate: !!options.immediateTitle });
+    }
+    if (typeof syncRealtimePolling === 'function') syncRealtimePolling();
+  }
+  function setEducatorDataLoading(loading) {
+    educatorDataLoading = !!loading;
+    document.body.classList.toggle('educator-data-loading', !!loading);
+    var root = document.getElementById('views');
+    if (root) {
+      root.setAttribute('aria-busy', loading ? 'true' : 'false');
+      root.setAttribute('aria-hidden', loading ? 'true' : 'false');
+    }
+    var status = document.getElementById('educatorDataLoading');
+    if (status) {
+      status.hidden = !loading;
+      if (loading && !educatorScopeBlocked) status.textContent = 'loading birds...';
+    }
+  }
+  function educatorScopeRequestCurrent(request) {
+    if (!request || request.generation !== educatorScopeGeneration) return false;
+    if (Number.isSafeInteger(request.attempt)
+      && request.attempt <= educatorScopeCompletedAttempt) return false;
+    if (request.scopeId !== educatorRequestScopeId()) return false;
+    var scope = effectiveEducatorScope;
+    if (request.stateKey && (!scope || request.stateKey !== scope.state_key)) return false;
+    if (request.stateRevision !== null && request.stateRevision !== undefined
+      && (!scope || +request.stateRevision !== +scope.state_revision)) return false;
+    return true;
+  }
+  function educatorScopeRetryable(request) {
+    if (!request || !validEducatorId(request.scopeId)) return false;
+    if (request.scopeId.indexOf('f_') === 0) return true;
+    var scope = effectiveEducatorScope;
+    return !scope || scope.id !== request.scopeId || !scope.status || scope.status === 'stopped';
+  }
+  function educatorScopeRetryKey(request) {
+    return request ? [request.generation, request.scopeId || '', request.stateKey || '',
+      request.stateRevision === null || request.stateRevision === undefined ? '' : request.stateRevision].join('|') : '';
+  }
+  function setEducatorScopeFailureStatus(retrying) {
+    setEducatorDataLoading(true);
+    var status = document.getElementById('educatorDataLoading');
+    if (status) status.textContent = retrying
+      ? 'birds are temporarily unavailable; retrying...'
+      : 'birds are temporarily unavailable; try again shortly';
+  }
+  function cancelEducatorScopeRetry() {
+    if (educatorScopeRetry && educatorScopeRetry.timer) clearTimeout(educatorScopeRetry.timer);
+    educatorScopeRetry = null;
+  }
+  function noteEducatorScopeFailure(request) {
+    if (!validEducatorScopeKey(request && request.scopeId) || !educatorScopeRequestCurrent(request)) return false;
+    var key = educatorScopeRetryKey(request);
+    if (!educatorScopeRetry || educatorScopeRetry.key !== key) {
+      cancelEducatorScopeRetry();
+      educatorScopeRetry = { key: key, request: request, retried: false, timer: null };
+    }
+    var retry = educatorScopeRetry;
+    if (retry.retried || !educatorScopeRetryable(request)) {
+      setEducatorScopeFailureStatus(false);
+      return false;
+    }
+    setEducatorScopeFailureStatus(true);
+    if (retry.timer || document.hidden) return false;
+    retry.timer = setTimeout(function () {
+      if (educatorScopeRetry !== retry) return;
+      retry.timer = null;
+      if (document.hidden || !educatorScopeRequestCurrent(retry.request)) {
+        cancelEducatorScopeRetry();
+        return;
+      }
+      retry.retried = true;
+      setEducatorScopeFailureStatus(true);
+      refreshAll(false);
+    }, EDUCATOR_SCOPE_RETRY_MS);
+    return true;
+  }
+  function clearEducatorScopeFailure(request) {
+    if (request && Number.isSafeInteger(request.attempt)) {
+      educatorScopeCompletedAttempt = Math.max(educatorScopeCompletedAttempt, request.attempt);
+    }
+    if (!educatorScopeRetry) return false;
+    if (request && educatorScopeRetry.key !== educatorScopeRetryKey(request)) return false;
+    cancelEducatorScopeRetry();
+    return true;
+  }
+  function blockEducatorScope(message) {
+    var priorId = educatorScopeId();
+    educatorScopeBlocked = true;
+    educatorScopeShared = validEducatorId(priorId);
+    scrubEducatorScopeSurface(priorId);
+    explicitEducatorScope = null;
+    effectiveEducatorScope = null;
+    resetScopedDataCaches();
+    syncEducatorScopePill({ immediateTitle: true });
+    setEducatorDataLoading(true);
+    var status = document.getElementById('educatorDataLoading');
+    if (status) status.textContent = message || 'listening period unavailable';
+  }
+  function initializeEducatorScopeFromUrl() {
+    var state = educatorScopeUrlState();
+    if (!state.present) return false;
+    if (!state.valid) {
+      blockEducatorScope();
+      return false;
+    }
+    educatorScopeBlocked = false;
+    educatorScopeShared = true;
+    explicitEducatorScope = state.scope;
+    effectiveEducatorScope = state.scope;
+    setEducatorDataLoading(true);
+    syncEducatorScopePill({ immediateTitle: true });
+    return true;
+  }
+  function authorizeEducatorScopes() {
+    educatorScopesAuthorized = true;
+    if (typeof authorizeEducatorFolderPreferences === 'function') authorizeEducatorFolderPreferences();
+    var urlState = educatorScopeUrlState();
+    if (urlState.valid) deferredEducatorScope = urlState.scope;
+    else if (!urlState.present) deferredEducatorScope = null;
+    if (!deferredEducatorScope || explicitEducatorScope) return false;
+    applyEducatorScope(deferredEducatorScope, { explicit: true, refresh: true });
+    return true;
+  }
+  function suspendEducatorScopes(options) {
+    options = options || {};
+    if (typeof closeEducatorTransientUi === 'function') closeEducatorTransientUi();
+    if (typeof suspendEducatorFolderPreferences === 'function') suspendEducatorFolderPreferences();
+    if (typeof clearEducatorCountState === 'function') clearEducatorCountState();
+    educatorScopesAuthorized = false;
+    removeLS(EDUCATOR_SCOPE_KEY);
+    if (educatorScopeShared && explicitEducatorScope && validEducatorId(explicitEducatorScope.id)) {
+      var sharedId = explicitEducatorScope.id;
+      scrubEducatorScopeSurface(sharedId);
+      var shared = normalizeEducatorScope({ id: sharedId });
+      explicitEducatorScope = shared;
+      effectiveEducatorScope = shared;
+      deferredEducatorScope = null;
+      syncEducatorScopePill({ immediateTitle: true });
+      try { if (typeof renderCollageFromData === 'function') renderCollageFromData(false); } catch (e) { }
+      try { if (typeof renderStatsContext === 'function') renderStatsContext(false); } catch (e) { }
+      try { if (typeof renderAtlas === 'function') renderAtlas(false); } catch (e) { }
+      resetScopedDataCaches();
+      if (options.refresh !== false && typeof refreshAll === 'function') refreshAll(true);
+      return;
+    }
+    scrubEducatorScopeSurface(educatorScopeId());
+    if (explicitEducatorScope) deferredEducatorScope = explicitEducatorScope;
+    var hadScope = !!(explicitEducatorScope || effectiveEducatorScope);
+    explicitEducatorScope = null;
+    effectiveEducatorScope = null;
+    syncEducatorScopePill({ immediateTitle: true });
+    if (!hadScope) return;
+    resetScopedDataCaches();
+    if (options.refresh !== false && typeof refreshAll === 'function') refreshAll(true);
+  }
+  function resetScopedDataCaches() {
+    if (typeof cancelEducatorScopeRetry === 'function') cancelEducatorScopeRetry();
+    educatorScopeGeneration += 1;
+    if (typeof statsContextSeq === 'number') statsContextSeq += 1;
+    if (typeof DATA === 'object' && DATA) {
+      Object.keys(DATA).forEach(function (key) { DATA[key] = null; });
+    }
+    if (typeof STATS === 'object' && STATS) {
+      var days = typeof STATS_DAYS === 'number' ? STATS_DAYS : 30;
+      STATS.detPerDay = new Array(days).fill(0);
+      STATS.specPerDay = new Array(days).fill(0);
+      STATS.byHour = new Array(24).fill(0);
+    }
+    if (typeof speciesTotals === 'object') speciesTotals = {};
+    setEducatorDataLoading(true);
+    if (typeof hourlyDate !== 'undefined') hourlyDate = null;
+    if (typeof SPECIES_CACHE === 'object' && SPECIES_CACHE) SPECIES_CACHE = {};
+    if (typeof _decodedCache === 'object' && _decodedCache) _decodedCache = {};
+    if (typeof stopAtlasCardAudio === 'function') stopAtlasCardAudio();
+    if (typeof stopModalAudio === 'function') stopModalAudio();
+    if (typeof realtimePollingReady !== 'undefined' && realtimePollingReady
+      && typeof syncRealtimePolling === 'function') {
+      syncRealtimePolling({ resetProbe: true });
+    }
+  }
+  function applyEducatorScope(value, options) {
+    options = options || {};
+    var scope = normalizeEducatorScope(value);
+    var prior = effectiveEducatorScope;
+    var priorId = prior && prior.id || '';
+    if (options.explicit !== false) {
+      if (scope && !educatorScopesAuthorized) {
+        deferredEducatorScope = scope;
+        return;
+      }
+      explicitEducatorScope = scope;
+      deferredEducatorScope = scope;
+      if (scope) {
+        writeLS(EDUCATOR_SCOPE_KEY, JSON.stringify(scope));
+        syncEducatorScopeUrl(scope);
+        educatorScopeShared = true;
+        educatorScopeBlocked = false;
+      } else {
+        removeLS(EDUCATOR_SCOPE_KEY);
+        syncEducatorScopeUrl(null);
+        educatorScopeShared = false;
+        educatorScopeBlocked = false;
+      }
+    } else if (options.clearExplicit) {
+      explicitEducatorScope = null;
+      deferredEducatorScope = null;
+      removeLS(EDUCATOR_SCOPE_KEY);
+      syncEducatorScopeUrl(null);
+      educatorScopeShared = false;
+      educatorScopeBlocked = false;
+    }
+    if (!scope || priorId !== scope.id) scrubEducatorScopeSurface(priorId);
+    effectiveEducatorScope = scope;
+    syncEducatorScopePill({ immediateTitle: !!options.immediateTitle });
+    var sameDataset = priorId === educatorScopeId()
+      && (!scope || (prior.revision === scope.revision
+        && prior.status === scope.status
+        && prior.state_key === scope.state_key
+        && prior.state_revision === scope.state_revision
+        && (!prior.entity_id || !scope.entity_id || prior.entity_id === scope.entity_id)));
+    if (sameDataset && !options.force) return;
+    resetScopedDataCaches();
+    if (options.refresh !== false && typeof refreshAll === 'function') refreshAll(true);
+  }
+  initializeEducatorScopeFromUrl();
+  function adoptEducatorScope(payload, requestScopeId, generation) {
+    if (generation !== educatorScopeGeneration) return false;
+    var returned = educatorScopeFromPayload(payload, requestScopeId);
+    if (returned === undefined) return true;
+    if (requestScopeId && (!returned || returned.id !== requestScopeId)) return false;
+    if (!returned) {
+      if (validEducatorId(requestScopeId) && educatorScopeShared) {
+        blockEducatorScope();
+        return false;
+      }
+      if (!effectiveEducatorScope) return true;
+      scrubEducatorScopeSurface(educatorScopeId());
+      effectiveEducatorScope = null;
+      syncEducatorScopePill();
+      resetScopedDataCaches();
+      setTimeout(function () { refreshAll(true); }, 0);
+      return false;
+    }
+    if (effectiveEducatorScope && effectiveEducatorScope.id !== returned.id) {
+      returned.label = returned.label || '';
+      effectiveEducatorScope = returned;
+      syncEducatorScopePill();
+      resetScopedDataCaches();
+      setTimeout(function () { refreshAll(true); }, 0);
+      return false;
+    }
+    if (!effectiveEducatorScope) {
+      effectiveEducatorScope = returned;
+      syncEducatorScopePill();
+      // The first automatic scope changes every dataset in this batch.
+      // Advance the generation before anything paints, then refetch the full
+      // listening period as one coherent snapshot.
+      resetScopedDataCaches();
+      setTimeout(function () { refreshAll(true); }, 0);
+      return false;
+    }
+    var metadataChanged = effectiveEducatorScope.revision !== returned.revision
+      || effectiveEducatorScope.status !== returned.status
+      || effectiveEducatorScope.state_key !== returned.state_key
+      || effectiveEducatorScope.state_revision !== returned.state_revision
+      || (effectiveEducatorScope.entity_id && returned.entity_id
+        && effectiveEducatorScope.entity_id !== returned.entity_id);
+    effectiveEducatorScope.automatic = !!returned.automatic;
+    effectiveEducatorScope.revision = returned.revision;
+    effectiveEducatorScope.status = returned.status;
+    effectiveEducatorScope.state_key = returned.state_key;
+    effectiveEducatorScope.state_revision = returned.state_revision;
+    if (returned.entity_id) effectiveEducatorScope.entity_id = returned.entity_id;
+    if (explicitEducatorScope && explicitEducatorScope.id === returned.id) {
+      explicitEducatorScope.revision = returned.revision;
+      explicitEducatorScope.status = returned.status;
+      explicitEducatorScope.state_key = returned.state_key;
+      explicitEducatorScope.state_revision = returned.state_revision;
+      explicitEducatorScope.automatic = false;
+      if (educatorScopesAuthorized) {
+        writeLS(EDUCATOR_SCOPE_KEY, JSON.stringify(explicitEducatorScope));
+      }
+    }
+    syncEducatorScopePill();
+    if (metadataChanged) {
+      resetScopedDataCaches();
+      setTimeout(function () { refreshAll(true); }, 0);
+      return false;
+    }
+    return true;
+  }
+  function educatorScopeTooLargeMessage(scopeId) {
+    if (scopeId === AUTOMATIC_EDUCATOR_SCOPE_ID) {
+      return 'current listening period is too large; stop it and start a new period';
+    }
+    return educatorScopesAuthorized
+      ? 'saved view is too large; split it into a smaller folder'
+      : 'listening period unavailable';
+  }
+  function automaticEducatorScopeTooLarge(error) {
+    var raw = error && error.status === 413 && error.body && error.body.educator_scope;
+    return !!raw && typeof raw === 'object' && !Array.isArray(raw)
+      && raw.automatic === true && raw.kind === 'capture'
+      && (raw.status === 'running' || raw.status === 'paused')
+      && typeof raw.revision === 'number' && Number.isSafeInteger(raw.revision) && raw.revision >= 0
+      && typeof raw.state_revision === 'number' && Number.isSafeInteger(raw.state_revision)
+      && raw.state_revision >= 0 && typeof raw.state_key === 'string'
+      && /^[a-f0-9]{24}$/.test(raw.state_key);
+  }
+  function scopedFetchJson(action, params, request) {
+    request = request || educatorScopeRequest();
+    if (request.generation !== educatorScopeGeneration) {
+      var obsolete = new Error('stale educator scope');
+      obsolete.educatorStale = true;
+      return Promise.reject(obsolete);
+    }
+    return fetchJson(birdApiUrl(action, params, request.scopeId)).then(function (payload) {
+      if (!adoptEducatorScope(payload, request.scopeId, request.generation)) {
+        var stale = new Error('stale educator scope');
+        stale.educatorStale = true;
+        throw stale;
+      }
+      return payload;
+    }).catch(function (error) {
+      var code = error && error.body && (error.body.code || error.body.error);
+      var authLost = error && error.status === 401 && validEducatorId(request.scopeId) && !educatorScopeShared;
+      if (authLost && request.generation === educatorScopeGeneration && adminAccessState !== 'locked') {
+        var authMessage = 'Your admin session expired. Unlock to continue.';
+        showAdminLocked(authMessage, false, false);
+        signalAdminLock(authMessage);
+      }
+      var automaticScopeTooLarge = error && error.status === 413 && !request.scopeId
+        && automaticEducatorScopeTooLarge(error);
+      var scopeTooLarge = error && error.status === 413
+        && (validEducatorScopeKey(request.scopeId) || automaticScopeTooLarge);
+      var scopeUnavailableStatus = error
+        && (error.status === 404 || error.status === 409 || scopeTooLarge);
+      var sharedScopeUnavailable = scopeUnavailableStatus
+        && educatorScopeShared && validEducatorId(request.scopeId);
+      var unavailable = scopeUnavailableStatus
+        && (sharedScopeUnavailable || !code || code === 'educator_scope_unavailable'
+          || code === 'data_generation_changed' || scopeTooLarge);
+      if (unavailable && (request.scopeId || automaticScopeTooLarge)
+        && request.generation === educatorScopeGeneration) {
+        if (scopeTooLarge) {
+          blockEducatorScope(educatorScopeTooLargeMessage(
+            automaticScopeTooLarge ? AUTOMATIC_EDUCATOR_SCOPE_ID : request.scopeId
+          ));
+        } else if (educatorScopeShared && validEducatorId(request.scopeId)) blockEducatorScope();
+        else {
+          applyEducatorScope(null, { refresh: false });
+          setTimeout(function () { refreshAll(true); }, 0);
+        }
+      }
+      if (error && error.status >= 500 && error.status <= 599
+        && request.generation === educatorScopeGeneration) {
+        noteEducatorScopeFailure(request);
+      }
+      throw error;
+    });
+  }
+  function educatorBatchIsCurrent(parts, request) {
+    if (request.generation !== educatorScopeGeneration) return false;
+    var expected = request.scopeId || educatorScopeId();
+    var expectedRevision = request.revision === null || request.revision === undefined
+      ? null : (Number.isFinite(+request.revision) ? +request.revision : null);
+    var batchRevision = null;
+    var expectedStateKey = typeof request.stateKey === 'string' ? request.stateKey : '';
+    var expectedStateRevision = request.stateRevision === null || request.stateRevision === undefined
+      ? null : (Number.isFinite(+request.stateRevision) ? +request.stateRevision : null);
+    var batchStateKey = null;
+    var batchStateRevision = null;
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      var returned = educatorScopeFromPayload(parts[i], request.scopeId);
+      if (returned === undefined) continue;
+      if (expected ? (!returned || returned.id !== expected) : !!returned) return false;
+      if (returned) {
+        if (batchRevision !== null && returned.revision !== batchRevision) return false;
+        batchRevision = returned.revision;
+        if (expectedRevision !== null && returned.revision !== expectedRevision) return false;
+        if (batchStateKey !== null && returned.state_key !== batchStateKey) return false;
+        if (batchStateRevision !== null && returned.state_revision !== batchStateRevision) return false;
+        batchStateKey = returned.state_key;
+        batchStateRevision = returned.state_revision;
+        if (expectedStateKey && returned.state_key !== expectedStateKey) return false;
+        if (expectedStateRevision !== null && returned.state_revision !== expectedStateRevision) return false;
+      }
+    }
+    return true;
+  }
+  var returnToEducators = document.getElementById('returnToEducators');
+  function routeToEducators(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    educatorAdminRouteFocus = true;
+    pendingAdminSection = 'educators';
+    educatorScopeBlocked = false;
+    applyEducatorScope(null, { force: true, refresh: true, immediateTitle: true });
+    if (location.hash !== '#admin=educators') location.hash = '#admin=educators';
+    if (adminAccessState === 'unlocked' && educatorsAvailable) {
+      openAdmin('educators');
+    } else if (adminAccessState === 'locked') {
+      showAdminLocked('', false, true);
+    } else {
+      openDd();
+      setTimeout(function () { focusEl(document.getElementById('lockPass')); }, 0);
+    }
+  }
+  if (returnToEducators) returnToEducators.addEventListener('click', routeToEducators);
+  syncEducatorScopePill();
 
   // Atlas can either follow the shared collage/stats window or stay on the
   // complete life list. This is a browser preference, like theme and bird
@@ -208,7 +835,9 @@
     return readLS(ATLAS_ALWAYS_ALL_KEY, 'off') === 'on';
   }
   function atlasWindowHours() {
-    return atlasAlwaysAll() ? 1000000 : currentHours;
+    // A capture or folder is already an exact interval union. Do not apply a
+    // second rolling-window filter inside that selected dataset.
+    return educatorScopeId() ? 1000000 : (atlasAlwaysAll() ? 1000000 : currentHours);
   }
   function syncAtlasAlwaysAll() {
     var on = atlasAlwaysAll();
@@ -223,6 +852,31 @@
     sessionAtlasAlwaysAll = !!on;
     writeLS(ATLAS_ALWAYS_ALL_KEY, on ? 'on' : 'off');
     syncAtlasAlwaysAll();
+  }
+
+  // The stamp wall remains the default Atlas. Classic cards are a local
+  // display preference only, so choosing them never enters the station config
+  // save path or changes filtering, sorting, recordings, or deep links.
+  var ATLAS_STYLE_KEY = 'bird:atlasStyle:v1';
+  var sessionAtlasStyle = null;
+  function atlasStyle() {
+    if (sessionAtlasStyle !== null) return sessionAtlasStyle;
+    return readLS(ATLAS_STYLE_KEY, 'stamps') === 'classic' ? 'classic' : 'stamps';
+  }
+  function atlasUsesClassicCards() {
+    return atlasStyle() === 'classic';
+  }
+  function syncAtlasStyle() {
+    var classic = atlasUsesClassicCards();
+    document.querySelectorAll('[data-atlas-classic]').forEach(function (sw) {
+      sw.setAttribute('aria-checked', classic ? 'true' : 'false');
+    });
+    if (DATA && DATA.lifelist) renderAtlas(false);
+  }
+  function applyAtlasStyle(classic) {
+    sessionAtlasStyle = classic ? 'classic' : 'stamps';
+    writeLS(ATLAS_STYLE_KEY, sessionAtlasStyle);
+    syncAtlasStyle();
   }
 
   // Remember the last confirmed illustration pose independently for each
@@ -353,6 +1007,10 @@
       sessionAtlasAlwaysAll = null;
       syncAtlasAlwaysAll();
     }
+    if (ev.key === ATLAS_STYLE_KEY || ev.key === null) {
+      sessionAtlasStyle = null;
+      syncAtlasStyle();
+    }
   });
   var winBtns = [].slice.call(winPick.querySelectorAll('button'));
   var currentHours = +readLS('bird:window', '24') || 24;
@@ -437,7 +1095,7 @@
   function loadTables(bust) {
     // bust=true refetches past every cache - used after an on-Pi generate
     // adds a species, so its mask becomes drawable without a reload.
-    var q = '?v=' + SKETCH_VERSION + (bust ? '&t=' + Date.now() : '');
+    var q = '?v=' + TABLE_VERSION + (bust ? '&t=' + Date.now() : '');
     return Promise.all([
       fetch('./dims.json' + q).then(function (r) { return r.json(); }),
       fetch('./masks.json' + q).then(function (r) { return r.json(); })
@@ -470,7 +1128,7 @@
     var com = commonName || (sp ? (sp.com || '') : '');
     if (com) base += '&com=' + encodeURIComponent(com);
     if (+pose > 1) base += '&pose=' + (+pose);
-    return base + '&v=' + (version || SKETCH_VERSION);
+    return base + '&v=' + artRevision(sci, version || SKETCH_VERSION);
   }
 
   // The collage asks for the size it is going to draw, which the atlas and the
@@ -2623,7 +3281,9 @@
       var s = r.data;
       // com flows through so the worker's JIT Gemini job uses the right
       // common name in its prompt for a freshly-detected species.
-      // &v=IMG_VERSION busts CF edge cache when we re-render any species.
+      // The per-species revision busts corrected art without evicting the
+      // rest of the illustration library from edge caches; &w= asks for
+      // the width the tile was already given.
       var img = collageImageSrc(s.sci, r.pose, s.com, r.fullW);
       var btn = document.createElement('button');
       btn.className = 'gtile';
@@ -2635,8 +3295,11 @@
       // "calls" (not "heard") because one bird can rack up dozens of
       // detections in a session; "heard" implies distinct individuals.
       var titleN = +s.n || 0;
+      var titlePeriod = educatorScopeId()
+        ? 'in ' + educatorScopeLabel(effectiveEducatorScope)
+        : windowLabel(currentHours, DATA.recent);
       btn.title = (s.com || s.sci) + ' - ' + fmtN(titleN) + ' ' +
-        (titleN === 1 ? 'call' : 'calls') + ' ' + windowLabel(currentHours);
+        (titleN === 1 ? 'call' : 'calls') + ' ' + titlePeriod;
       btn.style.left = r.x + 'px';
       btn.style.top = r.y + 'px';
       btn.style.width = r.fullW + 'px';
@@ -2889,10 +3552,13 @@
         var s = hit.data;
         var n = +s.n || 0;
         var noun = (n === 1) ? 'call' : 'calls';
-        tip.innerHTML = '<span class="ct-name">' + (s.com || s.sci) + '</span>'
+        var period = educatorScopeId()
+          ? 'in ' + educatorScopeLabel(effectiveEducatorScope)
+          : windowLabel(currentHours, DATA.recent);
+        tip.innerHTML = '<span class="ct-name">' + escHtml(s.com || s.sci) + '</span>'
           + '<span class="ct-w"> - </span>'
           + '<span class="ct-n">' + fmtN(n) + '</span>'
-          + '<span class="ct-w"> ' + noun + ' ' + windowLabel(currentHours) + '</span>';
+          + '<span class="ct-w"> ' + noun + ' ' + escHtml(period) + '</span>';
         tip.setAttribute('aria-hidden', 'false');
       } else {
         tip.setAttribute('aria-hidden', 'true');
@@ -2975,15 +3641,16 @@
   // Human label for the current time-window picker selection - replaces
   // a bare "window" with the span it actually covers. Thresholds match
   // the winPick buttons (1H / 12H / 24H / 7D / ALL).
-  function windowLabel(h) {
+  function windowLabel(h, windowData) {
+    if (windowData && windowData.midnight_clamped) return 'since midnight';
     if (h <= 1) return 'this hour';
     if (h <= 12) return 'past 12h';
-    if (h <= 24) return 'today';
-    if (h <= 168) return 'this week';
+    if (h <= 24) return 'past 24h';
+    if (h <= 168) return 'past 7d';
     return 'all time';
   }
   function statsWindowLabel(h) {
-    if (!hourlyDate) return windowLabel(h);
+    if (!hourlyDate) return windowLabel(h, DATA.statsRecent || DATA.recent);
     if (h <= 1) return 'selected hour';
     if (h <= 12) return 'final 12h';
     if (h <= 24) return 'selected day';
@@ -3019,7 +3686,15 @@
 
   function fetchJson(url) {
     return fetch(url, { cache: 'no-store' })
-      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); });
+      .then(function (r) {
+        if (r.ok) return r.json();
+        return r.json().catch(function () { return null; }).then(function (body) {
+          var error = new Error('HTTP ' + r.status);
+          error.status = r.status;
+          error.body = body;
+          throw error;
+        });
+      });
   }
 
   function backfillDaily(daily, days) {
@@ -3027,7 +3702,10 @@
     var byDate = {};
     (daily || []).forEach(function (row) { byDate[row.date] = row; });
     var out = new Array(days).fill(null).map(function () { return { detections: 0, species: 0 }; });
-    var today = new Date();
+    var scopedLast = educatorScopeId() && (daily || []).length
+      ? (daily || []).map(function (row) { return row.date; }).sort().pop()
+      : '';
+    var today = scopedLast ? new Date(scopedLast + 'T12:00:00') : new Date();
     for (var i = 0; i < days; i++) {
       var d = new Date(today);
       d.setDate(today.getDate() - (days - 1 - i));
@@ -3124,6 +3802,7 @@
       if (isNaN(ms)) return '';
       var d = new Date(ms);
       var p2 = function (n) { return n < 10 ? '0' + n : '' + n; };
+      if (educatorScopeId()) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
       if (currentHours <= 36) return p2(d.getHours()) + ':' + p2(d.getMinutes());
       if (currentHours <= 75 * 24) return (d.getMonth() + 1) + '/' + d.getDate();
       return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -3142,7 +3821,7 @@
     // a chart run together into a grey band. Work out how many actually fit at
     // this width and show every Nth, always keeping the first and the last so
     // the axis still states its own range.
-    var stampW = currentHours <= 36 ? 42 : 38;   // "07:45" against "Jul 21"
+    var stampW = educatorScopeId() ? 38 : (currentHours <= 36 ? 42 : 38);   // "07:45" against "Jul 21"
     var fits = Math.max(2, Math.floor(plotW / stampW));
     var stride = Math.max(1, Math.ceil(C / fits));
 
@@ -3216,17 +3895,24 @@
     var past = stats.is_today === false;
     var byPeriodCap = document.getElementById('statsByPeriodCap');
     var firstSeenCap = document.getElementById('statsFirstSeenCap');
-    if (byPeriodCap) byPeriodCap.textContent = past
+    var scopedLabel = educatorScopeId() ? educatorScopeLabel(effectiveEducatorScope) : '';
+    if (byPeriodCap) byPeriodCap.textContent = scopedLabel
+      ? 'detections in ' + scopedLabel
+      : past
       ? 'detections through ' + shortStatsDate(stats.date)
       : 'detections, grouped by recency';
-    if (firstSeenCap) firstSeenCap.textContent = past
+    if (firstSeenCap) firstSeenCap.textContent = scopedLabel
+      ? 'first detections in ' + scopedLabel
+      : past
       ? 'life list as of ' + shortStatsDate(stats.date)
       : 'newest additions to the life list';
-    document.getElementById('statsByPeriod').innerHTML =
-      liRow(past ? 'HOUR' : 'NOW', past ? 'final hour' : 'last hour', fmtN(last_hour))
-      + liRow(past ? 'DAY' : 'TODAY', past ? 'selected date' : 'today', fmtN(today_det))
-      + liRow('7D', past ? 'through this date' : 'last 7 days', fmtN(week_det))
-      + liRow('ALL', past ? 'through this date' : 'all time', fmtN(all_det));
+    document.getElementById('statsByPeriod').innerHTML = scopedLabel
+      ? liRow('CALLS', 'detections', fmtN(all_det))
+        + liRow('BIRDS', 'unique species', fmtN((((DATA.lifelist || {}).species) || []).length))
+      : liRow(past ? 'HOUR' : 'NOW', past ? 'final hour' : 'last hour', fmtN(last_hour))
+        + liRow(past ? 'DAY' : 'TODAY', past ? 'selected date' : 'today', fmtN(today_det))
+        + liRow('7D', past ? 'through this date' : 'last 7 days', fmtN(week_det))
+        + liRow('ALL', past ? 'through this date' : 'all time', fmtN(all_det));
 
     // Top Species - top 5 species in the current window. ./avian/api/birdnet-api.php?action=recent
     // already returns species sorted by last_seen DESC; re-sort by count.
@@ -3237,8 +3923,9 @@
     document.getElementById('statsTopSpec').innerHTML = ranked.length
       ? ranked.map(function (s, i) { return liRow(pad(i + 1), s.com, fmtN(+s.n), s.sci); }).join('')
       : '<li class="stats-window-empty"><span class="window-empty">' + EMPTY_WINDOW_COPY + '</span></li>';
-    document.getElementById('statsTopSpecCap').textContent =
-      'most-heard, ' + statsWindowLabel(currentHours);
+    document.getElementById('statsTopSpecCap').textContent = scopedLabel
+      ? 'most-heard, ' + scopedLabel
+      : 'most-heard, ' + statsWindowLabel(currentHours);
 
     // First Detections - newest additions to the life list, with a
     // "Xd ago" label computed from first_seen.
@@ -3422,7 +4109,10 @@
     var title = document.getElementById('statsRhythmTitle');
     var cap = document.getElementById('statsRhythmCap');
     if (title && cap) {
-      if (r && r.mode === 'week') {
+      if (educatorScopeId()) {
+        title.textContent = 'Listening Rhythm';
+        cap.textContent = 'detections within ' + educatorScopeLabel(effectiveEducatorScope);
+      } else if (r && r.mode === 'week') {
         title.textContent = "Week's Rhythm";
         cap.textContent = 'average day in this 7-day window, over the previous 7 days';
       } else if (currentHours <= 1) {
@@ -3528,7 +4218,7 @@
     var now = (DATA.hourly && typeof DATA.hourly.anchor_hour === 'number')
       ? DATA.hourly.anchor_hour
       : ((DATA.rhythm && typeof DATA.rhythm.now_hour === 'number') ? DATA.rhythm.now_hour : new Date().getHours());
-    if (currentHours >= 24) return { from: 0, to: 23 };
+    if (educatorScopeId() || currentHours >= 24) return { from: 0, to: 23 };
     var span = Math.max(1, Math.min(24, currentHours));
     return { from: Math.max(0, now - span + 1), to: now };
   }
@@ -3556,7 +4246,7 @@
     var label = document.getElementById('statsDateLabel');
     var next = document.getElementById('statsDateNext');
     if (!nav || !label || !next) return;
-    var isAll = currentHours >= 1000000;
+    var isAll = currentHours >= 1000000 && !educatorScopeId();
     nav.hidden = !isAll;
     if (!isAll) {
       closeStatsCalendar(false);
@@ -3982,10 +4672,17 @@
   // Font Awesome Free 6 glyphs (icons CC BY 4.0), path data verbatim.
   var ICON_COPY = '<svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M384 336l-192 0c-8.8 0-16-7.2-16-16l0-256c0-8.8 7.2-16 16-16l140.1 0L400 115.9 400 320c0 8.8-7.2 16-16 16zM192 384l192 0c35.3 0 64-28.7 64-64l0-204.1c0-12.7-5.1-24.9-14.1-33.9L366.1 14.1c-9-9-21.2-14.1-33.9-14.1L192 0c-35.3 0-64 28.7-64 64l0 256c0 35.3 28.7 64 64 64zM64 128c-35.3 0-64 28.7-64 64L0 448c0 35.3 28.7 64 64 64l192 0c35.3 0 64-28.7 64-64l0-32-48 0 0 32c0 8.8-7.2 16-16 16L64 464c-8.8 0-16-7.2-16-16l0-256c0-8.8 7.2-16 16-16l32 0 0-48-32 0z"/></svg>';
   var ICON_CHECK = '<svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M438.6 105.4c12.5 12.5 12.5 32.8 0 45.3l-256 256c-12.5 12.5-32.8 12.5-45.3 0l-128-128c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0L160 338.7 393.4 105.4c12.5-12.5 32.8-12.5 45.3 0z"/></svg>';
+  var ICON_EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.7 12s3.4-5.7 9.3-5.7 9.3 5.7 9.3 5.7-3.4 5.7-9.3 5.7S2.7 12 2.7 12z"/><circle cx="12" cy="12" r="2.5"/></svg>';
+  var ICON_EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 3l18 18M10.7 6.4A10.9 10.9 0 0 1 12 6.3c5.9 0 9.3 5.7 9.3 5.7a14.6 14.6 0 0 1-2.2 2.8M6.2 7.5A15.1 15.1 0 0 0 2.7 12s3.4 5.7 9.3 5.7a10.4 10.4 0 0 0 3.1-.5"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
   var ICON_CLOSE = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.2 3.2 L8.8 8.8 M8.8 3.2 L3.2 8.8"/></svg>';
   var ICON_PLAY = '<svg viewBox="0 0 12 12" fill="currentColor"><path d="M3 2 L10 6 L3 10 Z"/></svg>';
   var ICON_PAUSE = '<svg viewBox="0 0 12 12" fill="currentColor"><rect x="3" y="2" width="2.5" height="8"/><rect x="6.5" y="2" width="2.5" height="8"/></svg>';
   var ICON_LOOP = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 5.4h7.6l-1.7-1.7M12.8 10.6H5.2l1.7 1.7"/><path d="M12.8 5.4v2M3.2 10.6v-2"/></svg>';
+  var ICON_MORE_VERTICAL = '<svg viewBox="0 0 128 512" fill="currentColor" aria-hidden="true"><path d="M64 360a56 56 0 1 0 0 112 56 56 0 1 0 0-112zm0-152a56 56 0 1 0 0 112 56 56 0 1 0 0-112zM120 96A56 56 0 1 0 8 96a56 56 0 1 0 112 0z"/></svg>';
+  var ICON_MOVE = '<svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L338.7 224 32 224C14.3 224 0 238.3 0 256s14.3 32 32 32l306.7 0L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l160-160z"/></svg>';
+  var ICON_RENAME = '<svg viewBox="0 0 512 512" fill="currentColor" aria-hidden="true"><path d="M471.6 21.7c-28.9-28.9-75.7-28.9-104.6 0L339.8 48.9 463.1 172.2l27.2-27.2c28.9-28.9 28.9-75.7 0-104.6L471.6 21.7zM320.9 67.7 48 340.7V464H171.3L444.2 191.1 320.9 67.7zM160 384H128V352L339.8 140.2l32 32L160 384z"/></svg>';
+  var ICON_REMOVE = '<svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true"><path d="M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 17.7L320 32h96c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 32 32 32h96l7.2-14.3zM53.2 467 32 128H416L394.8 467c-1.6 25.3-22.6 45-48 45H101.2c-25.4 0-46.4-19.7-48-45z"/></svg>';
+  var ICON_FOLDER_PLUS = '<svg viewBox="0 0 576 512" fill="currentColor" aria-hidden="true"><path d="M32 32C14.3 32 0 46.3 0 64V400c0 44.2 35.8 80 80 80H496c44.2 0 80-35.8 80-80V160c0-44.2-35.8-80-80-80H302.6L268.1 45.5C259.1 36.9 247.2 32 234.7 32H32zM336 224h48v48h48c13.3 0 24 10.7 24 24s-10.7 24-24 24H384v48c0 13.3-10.7 24-24 24s-24-10.7-24-24V320H288c-13.3 0-24-10.7-24-24s10.7-24 24-24h48V224z"/></svg>';
 
   var ATLAS_SEEN_KEY = 'bird:atlasSeen';
   var atlasStuckThisLoad = false;
@@ -4204,8 +4901,32 @@
     });
   }
 
+  function clearAtlasPackedState(root) {
+    if (!root) return;
+    var grids = [root].concat([].slice.call(root.querySelectorAll('.atlas-fam-grid')));
+    grids.forEach(function (grid) {
+      grid.classList.remove('is-packed');
+      grid.style.removeProperty('height');
+      grid.style.removeProperty('--pack-gap');
+    });
+    root.querySelectorAll('.bird-card').forEach(function (card) {
+      ['left', 'top', 'position', 'grid-column', 'grid-row', '--slot-w', '--slot-h'].forEach(function (name) {
+        card.style.removeProperty(name);
+      });
+      var fit = card.querySelector('.stamp-fit');
+      if (fit) fit.style.removeProperty('--fit-scale');
+    });
+  }
+
   function packAtlasGrids(root) {
     if (!root) return;
+    var atlasRoot = root.id === 'atlasGrid' ? root :
+      (root.closest ? root.closest('#atlasGrid') : null);
+    if (atlasRoot && atlasRoot.dataset.layout === 'classic') {
+      clearAtlasPackedState(root);
+      queueAtlasOverflowState();
+      return;
+    }
     var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1280;
     var mobile = viewportWidth <= 700;
     // Grow the complete issue gradually from phone to desktop dimensions.
@@ -4422,6 +5143,34 @@
     });
     queueAtlasOverflowState();
   }
+  // Settings hides the view strip while its full-screen panel is open. If a
+  // background refresh lands then, the Atlas has no measurable width and the
+  // packer correctly defers. Repack once the panel releases the strip so the
+  // deferred wall cannot remain in its centered CSS fallback.
+  var atlasVisibilityPackFrame = 0;
+  var atlasVisibilityPackSettleTimer = 0;
+  var atlasResizeSettling = false;
+  function queueVisibleAtlasPack(options) {
+    options = options || {};
+    if (options.settle) {
+      atlasResizeSettling = true;
+      if (atlasVisibilityPackSettleTimer) clearTimeout(atlasVisibilityPackSettleTimer);
+      atlasVisibilityPackSettleTimer = setTimeout(function () {
+        atlasVisibilityPackSettleTimer = 0;
+        atlasResizeSettling = false;
+        queueVisibleAtlasPack();
+      }, Number(options.delay) || 140);
+    }
+    // Resize, fullscreen, and admin-close can all describe the same visible
+    // layout change. Share one frame instead of measuring it two or three times.
+    if (atlasVisibilityPackFrame) return;
+    atlasVisibilityPackFrame = requestAnimationFrame(function () {
+      atlasVisibilityPackFrame = 0;
+      if (document.body.classList.contains('admin-on')) return;
+      var grid = document.getElementById('atlasGrid');
+      if (grid) packAtlasGrids(grid);
+    });
+  }
   function animateAtlasFlip(root, before, options) {
     options = options || {};
     if (!root || !before || matchMedia('(prefers-reduced-motion:reduce)').matches) return;
@@ -4464,6 +5213,7 @@
       });
       fresh.replaceWith(prior);
     });
+    grid.dataset.layout = 'stamps';
     if (familyMode) {
       // Flat mode gives the root an absolute-positioning context and a fixed
       // pixel height. Family mode packs its nested grids instead, so carrying
@@ -4474,6 +5224,17 @@
       grid.setAttribute('data-mode', 'family');
     } else grid.removeAttribute('data-mode');
     grid.dataset.sort = sortMode;
+    grid.replaceChildren(template.content);
+  }
+
+  function commitClassicAtlasMarkup(grid, html, sortMode, familyMode) {
+    clearAtlasPackedState(grid);
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    grid.dataset.layout = 'classic';
+    grid.dataset.sort = sortMode;
+    if (familyMode) grid.setAttribute('data-mode', 'family');
+    else grid.removeAttribute('data-mode');
     grid.replaceChildren(template.content);
   }
 
@@ -4797,22 +5558,166 @@
     setTimeout(function () { clearInterval(t); }, 120000);
   }
 
+  var atlasCardAudio = null;
+  var atlasCardAudioButton = null;
+  function setAtlasCardButtonState(btn, state) {
+    if (!btn) return;
+    btn.setAttribute('data-state', state);
+    if (state === 'playing') {
+      btn.setAttribute('data-active', 'true');
+      btn.innerHTML = ICON_PAUSE + '<span>stop</span>';
+    } else if (state === 'loading') {
+      btn.setAttribute('data-active', 'true');
+      btn.innerHTML = ICON_PLAY + '<span>...</span>';
+    } else if (state === 'missing') {
+      btn.setAttribute('data-active', 'false');
+      btn.innerHTML = ICON_PLAY + '<span>no audio</span>';
+      setTimeout(function () {
+        if (btn.getAttribute('data-state') === 'missing') {
+          btn.innerHTML = ICON_PLAY + '<span>play</span>';
+          btn.setAttribute('data-state', 'idle');
+        }
+      }, 2200);
+    } else {
+      btn.setAttribute('data-active', 'false');
+      btn.innerHTML = ICON_PLAY + '<span>play</span>';
+    }
+  }
+  function clearAtlasCardProgress(card) {
+    if (!card) return;
+    var sw = card.querySelector('.spectro-wrap');
+    if (sw) sw.style.setProperty('--prog', '0%');
+    card.removeAttribute('data-playing');
+  }
+  function stopAtlasCardAudio() {
+    audioRelease(stopAtlasCardAudio);
+    var audio = atlasCardAudio;
+    var btn = atlasCardAudioButton;
+    atlasCardAudio = null;
+    atlasCardAudioButton = null;
+    if (audio) {
+      try { audio.pause(); } catch (e) { }
+    }
+    if (btn) {
+      clearAtlasCardProgress(btn.closest('.bird-card'));
+      setAtlasCardButtonState(btn, 'idle');
+    }
+  }
+  function activateAtlasCardAudio(btn) {
+    var card = btn && btn.closest('.bird-card');
+    if (!card) return;
+    if (btn === atlasCardAudioButton) { stopAtlasCardAudio(); return; }
+    stopAtlasCardAudio();
+    audioClaim(stopAtlasCardAudio);   // stop any modal-recording / live-stream audio
+    setAtlasCardButtonState(btn, 'loading');
+    atlasCardAudioButton = btn;
+    // Render the spectrogram client-side from the recording's audio so
+    // it matches the active theme. paintSpectrogram paints with the
+    // --paper/--ink palette per data-theme (the same canvas the modal
+    // recordings use), instead of a fixed-colour PNG that can't follow
+    // light/dark mode. Decoded buffers are cached per URL.
+    var spectroWrap = card.querySelector('.spectro-wrap');
+    if (spectroWrap && !spectroWrap.firstChild) {
+      var canvas = document.createElement('canvas');
+      spectroWrap.appendChild(canvas);
+      var aurl = card.dataset.audio;
+      if (_decodedCache[aurl]) {
+        paintSpectrogram(canvas, _decodedCache[aurl]);
+      } else {
+        var actx = getSpecCtx();
+        if (actx) {
+          fetch(aurl)
+            .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+            .then(function (b) { return actx.decodeAudioData(b); })
+            .then(function (buf) {
+              _decodedCache[aurl] = buf;
+              // Guard on document containment, not spectroWrap.contains:
+              // a 30s refreshAll() poll can rebuild the atlas and detach
+              // this card mid-decode. The detached wrap still "contains"
+              // its canvas, but a detached node measures 0x0, which would
+              // trap paintSpectrogram in its size-retry loop forever.
+              if (document.contains(canvas)) paintSpectrogram(canvas, buf);
+            })
+            .catch(function () { if (spectroWrap.contains(canvas)) spectroWrap.removeChild(canvas); });
+        } else {
+          spectroWrap.removeChild(canvas);
+        }
+      }
+    }
+    // Start audio.
+    var audio = new Audio(card.dataset.audio);
+    audio.addEventListener('canplay', function () {
+      if (atlasCardAudioButton !== btn || atlasCardAudio !== audio) return;
+      setAtlasCardButtonState(btn, 'playing');
+      card.setAttribute('data-playing', 'true');
+      audio.play();
+    });
+    // Progress bar on the spectrogram strip.
+    audio.addEventListener('timeupdate', function () {
+      if (atlasCardAudioButton !== btn || atlasCardAudio !== audio) return;
+      var pct = audio.duration ? (audio.currentTime / audio.duration * 100) : 0;
+      if (spectroWrap) spectroWrap.style.setProperty('--prog', pct.toFixed(1) + '%');
+    });
+    audio.addEventListener('ended', function () {
+      if (atlasCardAudioButton === btn && atlasCardAudio === audio) stopAtlasCardAudio();
+    });
+    audio.addEventListener('error', function () {
+      if (atlasCardAudioButton === btn && atlasCardAudio === audio) {
+        audioRelease(stopAtlasCardAudio);
+        setAtlasCardButtonState(btn, 'missing');
+        clearAtlasCardProgress(card);
+        atlasCardAudio = null;
+        atlasCardAudioButton = null;
+      }
+    });
+    atlasCardAudio = audio;
+    audio.load();
+  }
+  function wireAtlasCardAudio(grid) {
+    if (!grid || grid.__atlasCardAudioWired) return;
+    grid.__atlasCardAudioWired = true;
+    grid.addEventListener('click', function (ev) {
+      var btn = ev.target.closest && ev.target.closest('[data-action="play"]');
+      if (!btn || !grid.contains(btn)) return;
+      activateAtlasCardAudio(btn);
+    });
+  }
+  function wireAtlasSpectrogramScrub(grid) {
+    if (!grid || grid.__atlasSpectrogramScrubWired) return;
+    grid.__atlasSpectrogramScrubWired = true;
+    grid.addEventListener('click', function (ev) {
+      var sw = ev.target.closest && ev.target.closest('.spectro-wrap');
+      if (!sw || !sw.firstChild) return;
+      var card = sw.closest('.bird-card');
+      var btn = card && card.querySelector('[data-action="play"]');
+      if (!btn) return;
+      if (atlasCardAudioButton === btn && atlasCardAudio && atlasCardAudio.duration) {
+        var rect = sw.getBoundingClientRect();
+        var pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+        atlasCardAudio.currentTime = pct * atlasCardAudio.duration;
+      } else {
+        btn.click();
+      }
+    });
+  }
+
   function renderAtlas(animate) {
     // Hidden on the frame's plate, and not cheap to build: skip it rather
     // than spend a 415MB budget on a DOM nobody photographs.
     if (frameMode) return;
     var grid = document.getElementById('atlasGrid');
     if (!grid) return;
-    var priorRects = atlasRects(grid);
+    stopAtlasCardAudio();
+    var classic = atlasUsesClassicCards();
+    var priorRects = classic ? {} : atlasRects(grid);
 
     function showAtlasEmpty(message, hint) {
       // A packed wall owns an inline pixel height. If a later time window has
       // no birds, carrying that height into the empty state leaves several
       // screens of blank paper beneath the message.
-      grid.classList.remove('is-packed');
-      grid.style.removeProperty('height');
-      grid.style.removeProperty('--pack-gap');
+      clearAtlasPackedState(grid);
       grid.removeAttribute('data-mode');
+      grid.dataset.layout = classic ? 'classic' : 'stamps';
       grid.dataset.sort = window.__atlasSort || 'life';
       grid.innerHTML = '<div class="atlas-empty' + (hint ? '' : ' window-empty') + '">' +
         '<p>' + message + '</p>' +
@@ -4826,7 +5731,8 @@
     var atlasHours = atlasWindowHours();
     // Window count lookup: sci -> count in current window.
     var winBySci = {};
-    recent.forEach(function (s) { winBySci[s.sci] = +s.n; });
+    var recentBySci = {};
+    recent.forEach(function (s) { winBySci[s.sci] = +s.n; recentBySci[s.sci] = s; });
 
     if (!lifelist.length) {
       showAtlasEmpty('No birds detected yet.',
@@ -4882,7 +5788,20 @@
     // to the life list this 1h / 12h / 24h / 7d. Never shown for the ALL
     // window (every species would qualify against an open-ended span).
     var now = Date.now();
-    var windowStartMs = now - atlasHours * 3600000;
+    var serverWindowStart = DATA.recent && DATA.recent.window_start;
+    var parsedWindowStart = serverWindowStart
+      ? Date.parse(serverWindowStart.replace(' ', 'T'))
+      : NaN;
+    var windowStartMs = isNaN(parsedWindowStart)
+      ? now - atlasHours * 3600000
+      : parsedWindowStart;
+    var renderedScopeId = educatorScopeId();
+    var renderedScopeGeneration = educatorScopeGeneration;
+    var renderedScopeRevision = effectiveEducatorScope && Number.isFinite(+effectiveEducatorScope.revision)
+      ? +effectiveEducatorScope.revision : null;
+    var renderedStateKey = effectiveEducatorScope && effectiveEducatorScope.state_key || '';
+    var renderedStateRevision = effectiveEducatorScope && Number.isFinite(+effectiveEducatorScope.state_revision)
+      ? +effectiveEducatorScope.state_revision : null;
 
     var cardHtml = species.map(function (s) {
       var total = +s.n || 0;
@@ -4891,20 +5810,55 @@
       var isLifer = !isAllWindow && !isNaN(firstMs) && firstMs >= windowStartMs;
       var sketchSrc = './avian/api/cutout.php?sci=' + encodeURIComponent(s.sci) +
         (s.com ? '&com=' + encodeURIComponent(s.com) : '') +
-        '&v=' + SKETCH_VERSION;
-      var audioSrc = './avian/api/recording.php?sci=' + encodeURIComponent(s.sci);
+        '&v=' + artRevision(s.sci, SKETCH_VERSION);
+      var detectionId = renderedScopeId
+        ? educatorDetectionId(recentBySci[s.sci] && recentBySci[s.sci].detection_id)
+        : null;
+      var audioSrc = mediaApiUrl('recording', { sci: s.sci, detection: detectionId }, renderedScopeId);
       // The "all time" window makes the windowed count identical to the
       // all-time count - collapse to a single stat rather than print the
       // same number twice. Otherwise label the count with its span.
+      var allLabel = educatorScopeId() ? educatorScopeLabel(effectiveEducatorScope) : 'all time';
       var statRows = isAllWindow
-        ? '<div><span class="n">' + fmtNK(total) + '</span><span class="lbl-inline">all time</span></div>'
-        : '<div><span class="n">' + fmtNK(win) + '</span><span class="lbl-inline">' + windowLabel(atlasHours) + '</span></div>'
+        ? '<div><span class="n">' + fmtNK(total) + '</span><span class="lbl-inline">' + escHtml(allLabel) + '</span></div>'
+        : '<div><span class="n">' + fmtNK(win) + '</span><span class="lbl-inline">' + windowLabel(atlasHours, DATA.recent) + '</span></div>'
         + '<div><span class="n">' + fmtNK(total) + '</span><span class="lbl-inline">all time</span></div>';
       // Heard but never drawn: issue the bird's real family stamp with the
       // egg nest occupying its artwork plate. Waiting on tablesReady keeps
       // a card from flashing the placeholder before dims.json lands.
       var needsArt = tablesReady && !DIMS[slugify(s.sci)];
       var fresh = justGenerated[s.sci] ? '&t=' + justGenerated[s.sci] : '';
+      if (classic) {
+        var common = s.com || s.sci;
+        var imageSrc = needsArt ? './nest-eggs.webp' : sketchSrc + fresh;
+        var birdWiki = wikiUrl(s.sci);
+        var birdEbird = ebirdUrl(s.sci);
+        return ''
+          + '<article class="bird-card classic-atlas-card' + (needsArt ? ' needs-art' : '') + '"'
+          + ' data-sci="' + escHtml(s.sci) + '" data-com="' + escHtml(s.com || '') + '" data-audio="' + escHtml(audioSrc) + '"'
+          + ' data-edu="' + adminAttr(renderedScopeId) + '" data-edu-generation="' + renderedScopeGeneration + '"'
+          + ' data-edu-revision="' + (renderedScopeRevision === null ? '' : renderedScopeRevision) + '"'
+          + ' data-edu-state-key="' + adminAttr(renderedStateKey) + '"'
+          + ' data-edu-state-revision="' + (renderedStateRevision === null ? '' : renderedStateRevision) + '"'
+          + ' data-acc="' + (accession[s.sci] || 0) + '"'
+          + ' data-fresh="' + (isLifer ? '1' : '0') + '" data-win="' + win + '" data-total="' + total + '">'
+          + (isLifer ? '<span class="lifer-badge" title="new to the life list in this window">lifer</span>' : '')
+          + '<div class="stat">' + statRows + '</div>'
+          + '<div class="img-wrap">'
+          + '<img loading="lazy" decoding="async" src="' + escHtml(imageSrc) + '" alt="' + escHtml(common) + '">'
+          + '</div>'
+          + '<h3>' + escHtml(common) + '</h3>'
+          + '<div class="sci">' + escHtml(s.sci) + '</div>'
+          + '<div class="spectro-wrap" aria-hidden="true"></div>'
+          + '<div class="actions">'
+          + '<button type="button" class="chip play" data-action="play" aria-label="play recording">'
+          + ICON_PLAY + '<span>play</span>'
+          + '</button>'
+          + '<a class="chip ext" href="' + escHtml(birdWiki) + '" target="_blank" rel="noopener" aria-label="Wikipedia">wiki</a>'
+          + (birdEbird ? '<a class="chip ext" href="' + escHtml(birdEbird) + '" target="_blank" rel="noopener" aria-label="eBird">ebird</a>' : '')
+          + '</div>'
+          + '</article>';
+      }
       // Each species prints as a stamp whose design is set by its family.
       // The card stays the click target so the detail modal, highlighting
       // and deep links keep working untouched.
@@ -4913,7 +5867,9 @@
         placeholder: needsArt
       };
       var renderKey = [s.sci, s.com || '', accession[s.sci] || 0, total,
-        needsArt ? 'todo' : 'stamp', fresh, SKETCH_VERSION].join('|');
+        renderedScopeId, renderedScopeRevision, renderedStateKey, renderedStateRevision,
+        detectionId || '', needsArt ? 'todo' : 'stamp', fresh,
+        artRevision(s.sci, SKETCH_VERSION)].join('|');
       // Keep the Atlas issue itself as one clean click target. Generation lives
       // in the postcard's pose-control slot, where its cost and resulting state
       // change have enough context; no badge competes with the family artwork.
@@ -4923,6 +5879,10 @@
       return ''
         + '<article class="bird-card stamp-card' + (needsArt ? ' needs-art' : '') + '"'
         + ' data-sci="' + escHtml(s.sci) + '" data-com="' + escHtml(s.com || '') + '" data-audio="' + escHtml(audioSrc) + '"'
+        + ' data-edu="' + adminAttr(renderedScopeId) + '" data-edu-generation="' + renderedScopeGeneration + '"'
+        + ' data-edu-revision="' + (renderedScopeRevision === null ? '' : renderedScopeRevision) + '"'
+        + ' data-edu-state-key="' + adminAttr(renderedStateKey) + '"'
+        + ' data-edu-state-revision="' + (renderedStateRevision === null ? '' : renderedStateRevision) + '"'
         + ' data-render-key="' + escHtml(renderKey) + '"'
         + ' data-acc="' + (accession[s.sci] || 0) + '"'
         + ' data-fresh="' + (isLifer ? '1' : '0') + '" data-win="' + win + '" data-total="' + total + '">'
@@ -4937,7 +5897,7 @@
       function flush() {
         if (!run.length) return;
         out += '<section class="fam-block">'
-             + '<h2 class="atlas-fam"><span>' + cur + '</span><i></i>'
+             + '<h2 class="atlas-fam"><span>' + escHtml(cur) + '</span><i></i>'
              + '<em>' + run.length + ' species</em></h2>'
              + '<div class="atlas-fam-grid">' + run.join('') + '</div></section>';
         run = [];
@@ -4948,29 +5908,40 @@
         run.push(cardHtml[i]);
       });
       flush();
-      commitAtlasMarkup(grid, out, sortMode, true);
+      if (classic) commitClassicAtlasMarkup(grid, out, sortMode, true);
+      else commitAtlasMarkup(grid, out, sortMode, true);
     } else {
-      commitAtlasMarkup(grid, cardHtml.join(''), sortMode, false);
+      if (classic) commitClassicAtlasMarkup(grid, cardHtml.join(''), sortMode, false);
+      else commitAtlasMarkup(grid, cardHtml.join(''), sortMode, false);
     }
 
-    packAtlasGrids(grid);
-    requestAnimationFrame(function () {
-      animateAtlasFlip(grid, priorRects);
-      queueCompactHeader();
-    });
+    if (classic) {
+      // Classic cards use the historical responsive grid. Leave stamp-only
+      // geometry, visual effects, FLIP motion, and stick-on arrivals dormant.
+      requestAnimationFrame(function () {
+        queueAtlasOverflowState();
+        queueCompactHeader();
+      });
+    } else {
+      packAtlasGrids(grid);
+      requestAnimationFrame(function () {
+        animateAtlasFlip(grid, priorRects);
+        queueCompactHeader();
+      });
 
-    // The stamp designs that use a real pixel treatment (cyanotype, halftone,
-    // low-poly, engraving) paint onto a canvas once it has been laid out.
-    if (window.FX) {
-      requestAnimationFrame(function () { window.FX.run(grid); });
-      setTimeout(function () { window.FX.run(grid); }, 400);
+      // The stamp designs that use a real pixel treatment (cyanotype, halftone,
+      // low-poly, engraving) paint onto a canvas once it has been laid out.
+      if (window.FX) {
+        requestAnimationFrame(function () { window.FX.run(grid); });
+        setTimeout(function () { window.FX.run(grid); }, 400);
+      }
+
+      // Species heard since the last time the atlas was opened are stuck on
+      // one at a time, oldest arrival first, instead of wearing a badge.
+      // Runs once per page load, and only once the atlas is actually on
+      // screen, so the moment is never spent behind another view.
+      maybeStickNewStamps(grid, accession);
     }
-
-    // Species heard since the last time the atlas was opened are stuck on
-    // one at a time, oldest arrival first, instead of wearing a badge.
-    // Runs once per page load, and only once the atlas is actually on
-    // screen, so the moment is never spent behind another view.
-    maybeStickNewStamps(grid, accession);
 
     // Wire audio playback + spectrogram load.
     // - Only one card plays at a time. Clicking play on a different card
@@ -4979,161 +5950,21 @@
     //   for every card visible on initial render).
     // - If the recording endpoint 404s (no detection yet for this
     //   species), the button reverts and shows "no audio".
-    var currentAudio = null;
-    var currentBtn = null;
-    function setBtnState(btn, state) {
-      btn.setAttribute('data-state', state);
-      if (state === 'playing') {
-        btn.setAttribute('data-active', 'true');
-        btn.innerHTML = ICON_PAUSE + '<span>stop</span>';
-      } else if (state === 'loading') {
-        btn.setAttribute('data-active', 'true');
-        btn.innerHTML = ICON_PLAY + '<span>...</span>';
-      } else if (state === 'missing') {
-        btn.setAttribute('data-active', 'false');
-        btn.innerHTML = ICON_PLAY + '<span>no audio</span>';
-        setTimeout(function () {
-          if (btn.getAttribute('data-state') === 'missing') {
-            btn.innerHTML = ICON_PLAY + '<span>play</span>';
-            btn.setAttribute('data-state', 'idle');
-          }
-        }, 2200);
-      } else {
-        btn.setAttribute('data-active', 'false');
-        btn.innerHTML = ICON_PLAY + '<span>play</span>';
-      }
-    }
-    function clearProgressOn(card) {
-      if (!card) return;
-      var sw = card.querySelector('.spectro-wrap');
-      if (sw) sw.style.setProperty('--prog', '0%');
-      card.removeAttribute('data-playing');
-    }
-    function stopCurrent() {
-      audioRelease(stopCurrent);
-      if (currentAudio) {
-        try { currentAudio.pause(); } catch (e) { }
-        currentAudio = null;
-      }
-      if (currentBtn) {
-        var card = currentBtn.closest('.bird-card');
-        clearProgressOn(card);
-        setBtnState(currentBtn, 'idle');
-        currentBtn = null;
-      }
-    }
-    grid.querySelectorAll('[data-action="play"]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var card = btn.closest('.bird-card');
-        if (btn === currentBtn) { stopCurrent(); return; }
-        stopCurrent();
-        audioClaim(stopCurrent);   // stop any modal-recording / live-stream audio
-        setBtnState(btn, 'loading');
-        currentBtn = btn;
-        // Render the spectrogram client-side from the recording's audio so
-        // it matches the active theme. paintSpectrogram paints with the
-        // --paper/--ink palette per data-theme (the same canvas the modal
-        // recordings use), instead of a fixed-colour PNG that can't follow
-        // light/dark mode. Decoded buffers are cached per URL.
-        var spectroWrap = card.querySelector('.spectro-wrap');
-        if (spectroWrap && !spectroWrap.firstChild) {
-          var canvas = document.createElement('canvas');
-          spectroWrap.appendChild(canvas);
-          var aurl = card.dataset.audio;
-          if (_decodedCache[aurl]) {
-            paintSpectrogram(canvas, _decodedCache[aurl]);
-          } else {
-            var actx = getSpecCtx();
-            if (actx) {
-              fetch(aurl)
-                .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
-                .then(function (b) { return actx.decodeAudioData(b); })
-                .then(function (buf) {
-                  _decodedCache[aurl] = buf;
-                  // Guard on document containment, not spectroWrap.contains:
-                  // a 30s refreshAll() poll can rebuild the atlas and detach
-                  // this card mid-decode. The detached wrap still "contains"
-                  // its canvas, but a detached node measures 0x0, which would
-                  // trap paintSpectrogram in its size-retry loop forever.
-                  if (document.contains(canvas)) paintSpectrogram(canvas, buf);
-                })
-                .catch(function () { if (spectroWrap.contains(canvas)) spectroWrap.removeChild(canvas); });
-            } else {
-              spectroWrap.removeChild(canvas);
-            }
-          }
-        }
-        // Start audio.
-        var audio = new Audio(card.dataset.audio);
-        audio.addEventListener('canplay', function () {
-          if (currentBtn !== btn) return; // user clicked away
-          setBtnState(btn, 'playing');
-          card.setAttribute('data-playing', 'true');
-          audio.play();
-        });
-        // Progress bar on the spectrogram strip.
-        audio.addEventListener('timeupdate', function () {
-          if (currentBtn !== btn) return;
-          var pct = audio.duration ? (audio.currentTime / audio.duration * 100) : 0;
-          if (spectroWrap) spectroWrap.style.setProperty('--prog', pct.toFixed(1) + '%');
-        });
-        audio.addEventListener('ended', function () {
-          if (currentBtn === btn) stopCurrent();
-        });
-        audio.addEventListener('error', function () {
-          if (currentBtn === btn) {
-            setBtnState(btn, 'missing');
-            clearProgressOn(card);
-            currentAudio = null; currentBtn = null;
-          }
-        });
-        currentAudio = audio;
-        audio.load();
-      });
-    });
+    // The Atlas root survives every render, including keyed stamp-card reuse.
+    // One delegated play handler therefore covers both layouts without ever
+    // accumulating listeners on a retained card or button.
+    wireAtlasCardAudio(grid);
 
-    // Spectrogram click = scrub to that position (if playing) or restart.
-    grid.addEventListener('click', function (ev) {
-      var sw = ev.target.closest && ev.target.closest('.spectro-wrap');
-      if (!sw || !sw.firstChild) return;
-      var card = sw.closest('.bird-card');
-      var btn = card.querySelector('[data-action="play"]');
-      // If this card is the active one, scrub.
-      if (currentBtn === btn && currentAudio && currentAudio.duration) {
-        var rect = sw.getBoundingClientRect();
-        var pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-        currentAudio.currentTime = pct * currentAudio.duration;
-      } else {
-        // Otherwise start playback from the top.
-        btn.click();
-      }
-    });
+    // One delegated scrub listener survives all card rebuilds. Repeated Atlas
+    // refreshes must not multiply the seek or restart action.
+    wireAtlasSpectrogramScrub(grid);
     if (animate) playAtlasEntrance();
   }
 
-  var atlasResizeFrame = 0;
-  var atlasResizeSettleTimer = 0;
-  var atlasResizeSettling = false;
-  window.addEventListener('resize', function () {
-    atlasResizeSettling = true;
-    clearTimeout(atlasResizeSettleTimer);
-    atlasResizeSettleTimer = setTimeout(function () {
-      atlasResizeSettleTimer = 0;
-      if (atlasResizeFrame) {
-        cancelAnimationFrame(atlasResizeFrame);
-        atlasResizeFrame = 0;
-      }
-      atlasResizeSettling = false;
-      var grid = document.getElementById('atlasGrid');
-      if (grid) packAtlasGrids(grid);
-    }, 140);
-    if (atlasResizeFrame) return;
-    atlasResizeFrame = requestAnimationFrame(function () {
-      atlasResizeFrame = 0;
-      var grid = document.getElementById('atlasGrid');
-      if (grid) packAtlasGrids(grid);
-    });
-  }, { passive: true });
+  function handleAtlasResize() {
+    queueVisibleAtlasPack({ settle: true, delay: 140 });
+  }
+  window.addEventListener('resize', handleAtlasResize, { passive: true });
 
   // The chart column and the info column must be the same height: the info
   // column is fixed content, so its natural height is the target, and both
@@ -5187,20 +6018,24 @@
 
   function refreshStatsContext(animate) {
     var seq = ++statsContextSeq;
-    var forDate = currentHours >= 1000000 ? hourlyDate : null;
-    var forHours = currentHours;
-    var dateArg = forDate ? '&date=' + encodeURIComponent(forDate) : '';
+    var request = educatorScopeRequest();
+    var forDate = currentHours >= 1000000 && !educatorScopeId() ? hourlyDate : null;
+    var forHours = educatorScopeId() ? 1000000 : currentHours;
     return Promise.all([
-      fetchJson('./avian/api/birdnet-api.php?action=stats' + dateArg),
-      fetchJson('./avian/api/birdnet-api.php?action=firstseen&limit=10' + dateArg),
-      fetchJson('./avian/api/birdnet-api.php?action=recent&hours=' + forHours + dateArg),
-      fetchJson('./avian/api/birdnet-api.php?action=rhythm&hours=' + forHours + dateArg),
-      fetchJson('./avian/api/birdnet-api.php?action=hourly' + dateArg),
+      scopedFetchJson('stats', { date: forDate }, request),
+      scopedFetchJson('firstseen', { limit: 10, date: forDate }, request),
+      scopedFetchJson('recent', { hours: forHours, date: forDate }, request),
+      scopedFetchJson('rhythm', { hours: forHours, date: forDate }, request),
+      scopedFetchJson('hourly', { date: forDate }, request),
     ]).then(function (parts) {
-      if (seq !== statsContextSeq || forDate !== hourlyDate || forHours !== currentHours) return;
+      if (!educatorBatchIsCurrent(parts, request)
+        || seq !== statsContextSeq
+        || (!request.scopeId && forDate !== hourlyDate)
+        || forHours !== (educatorScopeId() ? 1000000 : currentHours)) return;
       DATA.stats = parts[0];
       DATA.firstseen = parts[1];
       DATA.statsRecent = parts[2];
+      if (parts[2] && typeof parts[2].site_name === 'string') applySiteName(parts[2].site_name);
       DATA.rhythm = parts[3];
       DATA.hourly = parts[4];
       renderStatsContext(animate);
@@ -5212,37 +6047,55 @@
     // changes the picker again before it resolves - or a slower poll
     // lands later - we discard the stale response so the collage
     // never reverts to a different window.
-    var forHours = currentHours;
-    return fetchJson('./avian/api/birdnet-api.php?action=recent&hours=' + forHours)
+    var forHours = educatorScopeId() ? 1000000 : currentHours;
+    var request = educatorScopeRequest();
+    return scopedFetchJson('recent', { hours: forHours }, request)
       .then(function (j) {
-        if (forHours !== currentHours) return; // window changed mid-flight
+        if (request.generation !== educatorScopeGeneration
+          || forHours !== (educatorScopeId() ? 1000000 : currentHours)) return; // window or scope changed mid-flight
+        if (typeof j.site_name === 'string') applySiteName(j.site_name);
         DATA.recent = j; renderWindowDependent(animate);
       })
       .catch(function (e) { console.warn('recent fetch failed', e); });
   }
   function refreshAll(animate) {
-    var forHours = currentHours;
-    var liveStats = hourlyDate === null;
+    if (educatorScopeBlocked) return Promise.resolve(false);
+    var forHours = educatorScopeId() ? 1000000 : currentHours;
+    var request = educatorScopeRequest();
+    var liveStats = hourlyDate === null || !!educatorScopeId();
+    var transactional = educatorDataLoading || !!request.scopeId;
+    var calendarNeeded = !DATA.calendar;
+    function tolerate(fetching) {
+      return transactional ? fetching : fetching.catch(function () { return null; });
+    }
     return Promise.all([
-      liveStats ? fetchJson('./avian/api/birdnet-api.php?action=stats').catch(function () { return null; }) : Promise.resolve(null),
-      fetchJson('./avian/api/birdnet-api.php?action=lifelist').catch(function () { return null; }),
-      fetchJson('./avian/api/birdnet-api.php?action=timeseries&days=30').catch(function () { return null; }),
-      liveStats ? fetchJson('./avian/api/birdnet-api.php?action=firstseen&limit=10').catch(function () { return null; }) : Promise.resolve(null),
-      fetchJson('./avian/api/birdnet-api.php?action=recent&hours=' + forHours).catch(function () { return null; }),
-      liveStats ? fetchJson('./avian/api/birdnet-api.php?action=rhythm&hours=' + forHours).catch(function () { return null; }) : Promise.resolve(null),
-      liveStats ? fetchJson('./avian/api/birdnet-api.php?action=hourly').catch(function () { return null; }) : Promise.resolve(null),
-      DATA.calendar ? Promise.resolve(null) : fetchJson('./avian/api/birdnet-api.php?action=calendar').catch(function () { return null; }),
+      liveStats ? tolerate(scopedFetchJson('stats', {}, request)) : Promise.resolve(null),
+      tolerate(scopedFetchJson('lifelist', {}, request)),
+      tolerate(scopedFetchJson('timeseries', { days: 30 }, request)),
+      liveStats ? tolerate(scopedFetchJson('firstseen', { limit: 10 }, request)) : Promise.resolve(null),
+      tolerate(scopedFetchJson('recent', { hours: forHours }, request)),
+      liveStats ? tolerate(scopedFetchJson('rhythm', { hours: forHours }, request)) : Promise.resolve(null),
+      liveStats ? tolerate(scopedFetchJson('hourly', {}, request)) : Promise.resolve(null),
+      calendarNeeded ? tolerate(scopedFetchJson('calendar', {}, request)) : Promise.resolve(null),
     ]).then(function (parts) {
-      var stillLiveStats = liveStats && hourlyDate === null;
+      if (!educatorBatchIsCurrent(parts, request)) {
+        if (request.generation === educatorScopeGeneration) setTimeout(function () { refreshAll(animate); }, 0);
+        return;
+      }
+      if (transactional && (!parts[0] || !parts[1] || !parts[2] || !parts[3]
+        || !parts[4] || !parts[5] || !parts[6] || (calendarNeeded && !parts[7]))) return;
+      var stillLiveStats = liveStats && (hourlyDate === null || !!educatorScopeId());
       if (stillLiveStats && parts[0]) DATA.stats = parts[0];
       DATA.lifelist = parts[1];
       DATA.timeseries = parts[2];
       if (stillLiveStats && parts[3]) DATA.firstseen = parts[3];
       // Only accept the recent slice if the window hasn't changed
       // since this poll started - otherwise keep what's there.
-      if (forHours === currentHours && parts[4]) {
+      if (request.generation === educatorScopeGeneration
+        && forHours === (educatorScopeId() ? 1000000 : currentHours) && parts[4]) {
         DATA.recent = parts[4];
         if (stillLiveStats) DATA.statsRecent = parts[4];
+        if (typeof parts[4].site_name === 'string') applySiteName(parts[4].site_name);
       }
       // A failed rhythm poll keeps the last-known chart rather than blanking it.
       if (stillLiveStats && parts[5]) DATA.rhythm = parts[5];
@@ -5257,6 +6110,12 @@
       renderHourly();
       updateStatsDateNav();
       renderCollageFromData(animate);
+      if (transactional) {
+        if (typeof clearEducatorScopeFailure === 'function') clearEducatorScopeFailure(request);
+        setEducatorDataLoading(false);
+      }
+    }).catch(function (error) {
+      console.warn('full data fetch failed', error);
     });
   }
 
@@ -5277,34 +6136,267 @@
   });
 
   // ---- Realtime polling ----
-  // Every POLL_MS the page refetches the live data set so the collage,
-  // stats, and atlas reflect new detections without a manual reload.
-  // We use refreshAll() (cheap: 5 small JSON fetches) so the dependent
-  // text/charts update too. Polling pauses when the tab is hidden and
-  // resumes (with an immediate fetch) when it becomes visible again.
+  // Live station data keeps its full 30-second refresh. Saved capabilities use
+  // a small probe instead: the probe detects late analyzer writes, deletion,
+  // and a running capture inside a folder without rebuilding every public view.
   var POLL_MS = 30 * 1000;
+  var EDUCATOR_SCOPE_PROBE_SLOW_MS = 2 * 60 * 1000;
+  var EDUCATOR_SCOPE_PROBE_GRACE_MS = 2 * 60 * 1000;
   var pollTimer = null;
+  var periodicRefreshInFlight = null;
+  var visibilityRefreshQueued = false;
+  var educatorScopeProbeTimer = null;
+  var educatorScopeProbeInFlight = null;
+  var educatorScopeProbeQueued = false;
+  var educatorScopeProbeEpoch = 0;
+  var educatorScopeProbeIdentity = '';
+  var educatorScopeProbeSnapshot = null;
+  var educatorScopeProbeFastUntil = 0;
+  function educatorScopeNeedsRealtimePolling() {
+    if (educatorScopeBlocked) return false;
+    if (!effectiveEducatorScope) return true;
+    if (effectiveEducatorScope.automatic) return true;
+    return effectiveEducatorScope.status === 'running';
+  }
+  function educatorScopeNeedsProbe() {
+    var scopeId = educatorRequestScopeId();
+    return !educatorScopeBlocked && !!effectiveEducatorScope
+      && !effectiveEducatorScope.automatic && validEducatorId(scopeId)
+      && !educatorScopeNeedsRealtimePolling();
+  }
+  function educatorScopeProbeKey() {
+    return educatorScopeNeedsProbe()
+      ? educatorScopeGeneration + '|' + educatorRequestScopeId() : '';
+  }
+  function cancelEducatorScopeProbe(invalidate) {
+    if (educatorScopeProbeTimer) clearTimeout(educatorScopeProbeTimer);
+    educatorScopeProbeTimer = null;
+    educatorScopeProbeQueued = false;
+    if (invalidate) {
+      educatorScopeProbeEpoch += 1;
+      educatorScopeProbeIdentity = '';
+      educatorScopeProbeSnapshot = null;
+      educatorScopeProbeFastUntil = 0;
+      educatorScopeProbeInFlight = null;
+    }
+  }
+  function educatorScopeProbeCurrent(request) {
+    return !!request && request.epoch === educatorScopeProbeEpoch
+      && request.identity === educatorScopeProbeIdentity
+      && request.generation === educatorScopeGeneration
+      && request.scopeId === educatorRequestScopeId()
+      && educatorScopeNeedsProbe() && !document.hidden;
+  }
+  function educatorScopeProbeResponse(value, request) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || typeof value.open !== 'boolean'
+      || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{24}$/.test(value.fingerprint)
+      || !value.educator_scope || typeof value.educator_scope !== 'object'
+      || Array.isArray(value.educator_scope)) return null;
+    var raw = value.educator_scope;
+    var kind = request.scopeId.indexOf('f_') === 0 ? 'folder' : 'capture';
+    if (raw.kind !== kind || raw.automatic !== false
+      || typeof raw.revision !== 'number' || !Number.isSafeInteger(raw.revision) || raw.revision < 0
+      || ['running', 'paused', 'stopped', 'saved'].indexOf(raw.status) === -1
+      || typeof raw.state_revision !== 'number' || !Number.isSafeInteger(raw.state_revision)
+      || raw.state_revision < 0 || typeof raw.state_key !== 'string'
+      || !/^[a-f0-9]{24}$/.test(raw.state_key)) return null;
+    return {
+      open: value.open,
+      fingerprint: value.fingerprint,
+      scope: normalizeEducatorScope({
+        id: request.scopeId,
+        kind: raw.kind,
+        revision: raw.revision,
+        status: raw.status,
+        automatic: false,
+        state_revision: raw.state_revision,
+        state_key: raw.state_key,
+      }),
+    };
+  }
+  function acceptEducatorScopeProbe(value, request) {
+    if (!educatorScopeProbeCurrent(request)) return false;
+    var result = educatorScopeProbeResponse(value, request);
+    if (!result || !result.scope) return false;
+    var prior = educatorScopeProbeSnapshot;
+    var scope = effectiveEducatorScope;
+    var changed = !prior || prior.fingerprint !== result.fingerprint
+      || prior.stateKey !== result.scope.state_key || prior.open !== result.open
+      || !scope || scope.state_key !== result.scope.state_key;
+    var stoppedNow = !!prior && prior.open && !result.open;
+    scope.revision = result.scope.revision;
+    scope.status = result.scope.status;
+    scope.state_key = result.scope.state_key;
+    scope.state_revision = result.scope.state_revision;
+    if (explicitEducatorScope && explicitEducatorScope.id === request.scopeId) {
+      explicitEducatorScope.revision = scope.revision;
+      explicitEducatorScope.status = scope.status;
+      explicitEducatorScope.state_key = scope.state_key;
+      explicitEducatorScope.state_revision = scope.state_revision;
+      if (educatorScopesAuthorized) {
+        writeLS(EDUCATOR_SCOPE_KEY, JSON.stringify(explicitEducatorScope));
+      }
+    }
+    educatorScopeProbeSnapshot = {
+      fingerprint: result.fingerprint,
+      stateKey: result.scope.state_key,
+      open: result.open,
+    };
+    if (stoppedNow) educatorScopeProbeFastUntil = Date.now() + EDUCATOR_SCOPE_PROBE_GRACE_MS;
+    if (changed) runPeriodicRefresh(true);
+    return true;
+  }
+  function handleEducatorScopeProbeFailure(error, request) {
+    if (!educatorScopeProbeCurrent(request) || !error
+      || (error.status !== 404 && error.status !== 409 && error.status !== 413)) return false;
+    if (error.status === 413) blockEducatorScope(educatorScopeTooLargeMessage(request.scopeId));
+    else if (educatorScopeShared) blockEducatorScope();
+    else applyEducatorScope(null, { refresh: true });
+    return true;
+  }
+  function educatorScopeProbeDelay() {
+    return educatorScopeProbeSnapshot && educatorScopeProbeSnapshot.open
+      || Date.now() < educatorScopeProbeFastUntil
+      ? POLL_MS : EDUCATOR_SCOPE_PROBE_SLOW_MS;
+  }
+  function scheduleEducatorScopeProbe(delay) {
+    if (educatorScopeProbeTimer || educatorScopeProbeInFlight || document.hidden
+      || !educatorScopeNeedsProbe()) return false;
+    educatorScopeProbeTimer = setTimeout(function () {
+      educatorScopeProbeTimer = null;
+      runEducatorScopeProbe(false);
+    }, delay === undefined ? educatorScopeProbeDelay() : delay);
+    return true;
+  }
+  function runEducatorScopeProbe(force) {
+    force = !!force;
+    if (document.hidden || !educatorScopeNeedsProbe()) return Promise.resolve(false);
+    if (educatorScopeProbeInFlight) {
+      if (force) educatorScopeProbeQueued = true;
+      return educatorScopeProbeInFlight.promise;
+    }
+    if (educatorScopeProbeTimer) {
+      clearTimeout(educatorScopeProbeTimer);
+      educatorScopeProbeTimer = null;
+    }
+    var request = {
+      epoch: educatorScopeProbeEpoch,
+      identity: educatorScopeProbeIdentity,
+      generation: educatorScopeGeneration,
+      scopeId: educatorRequestScopeId(),
+    };
+    var flight = { request: request, promise: null };
+    educatorScopeProbeInFlight = flight;
+    flight.promise = fetchJson(birdApiUrl('scope-probe', {}, request.scopeId)).then(function (value) {
+      return acceptEducatorScopeProbe(value, request);
+    }).catch(function (error) {
+      handleEducatorScopeProbeFailure(error, request);
+      return false;
+    }).then(function (value) {
+      if (educatorScopeProbeInFlight !== flight) return value;
+      educatorScopeProbeInFlight = null;
+      if (!educatorScopeProbeCurrent(request)) return value;
+      if (educatorScopeProbeQueued) {
+        educatorScopeProbeQueued = false;
+        return runEducatorScopeProbe(true);
+      }
+      scheduleEducatorScopeProbe();
+      syncRealtimePolling();
+      return value;
+    });
+    return flight.promise;
+  }
+  function syncEducatorScopeProbe(reset) {
+    var identity = educatorScopeProbeKey();
+    if (!identity) {
+      cancelEducatorScopeProbe(true);
+      return false;
+    }
+    if (reset || identity !== educatorScopeProbeIdentity) {
+      cancelEducatorScopeProbe(true);
+      educatorScopeProbeIdentity = identity;
+      educatorScopeProbeFastUntil = Date.now() + EDUCATOR_SCOPE_PROBE_GRACE_MS;
+    }
+    return scheduleEducatorScopeProbe();
+  }
+  function runPeriodicRefresh(force) {
+    force = !!force;
+    if (document.hidden || (!force && !educatorScopeNeedsRealtimePolling())) {
+      return Promise.resolve(false);
+    }
+    if (periodicRefreshInFlight) {
+      // Timer ticks are intentionally dropped. A visibility return is queued
+      // once so it still observes changes made while this tab was hidden.
+      if (force) visibilityRefreshQueued = true;
+      return periodicRefreshInFlight;
+    }
+    periodicRefreshInFlight = Promise.resolve().then(function () {
+      if (document.hidden || (!force && !educatorScopeNeedsRealtimePolling())) return false;
+      return refreshAll();
+    }).then(function (value) {
+      periodicRefreshInFlight = null;
+      if (visibilityRefreshQueued) {
+        visibilityRefreshQueued = false;
+        return runPeriodicRefresh(true);
+      }
+      return value;
+    }, function (error) {
+      periodicRefreshInFlight = null;
+      if (visibilityRefreshQueued) {
+        visibilityRefreshQueued = false;
+        return runPeriodicRefresh(true);
+      }
+      console.warn('periodic data fetch failed', error);
+      return false;
+    });
+    return periodicRefreshInFlight;
+  }
   function startPolling() {
-    stopPolling();
     // A camera does not need the picture to keep changing while it is open.
     if (frameMode) return;
+    if (pollTimer || document.hidden || !educatorScopeNeedsRealtimePolling()) return;
     pollTimer = setInterval(function () {
-      if (document.hidden) return;
-      refreshAll();
+      runPeriodicRefresh(false);
     }, POLL_MS);
   }
   function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  function syncRealtimePolling(options) {
+    options = options || {};
+    if (!realtimePollingReady) return;
+    if (document.hidden || educatorScopeBlocked) {
+      stopPolling();
+      cancelEducatorScopeProbe(true);
+    } else if (educatorScopeNeedsRealtimePolling()) {
+      cancelEducatorScopeProbe(true);
+      startPolling();
+    } else if (educatorScopeNeedsProbe()) {
+      stopPolling();
+      syncEducatorScopeProbe(!!options.resetProbe);
+    } else {
+      stopPolling();
+      cancelEducatorScopeProbe(true);
+    }
+  }
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
+      cancelEducatorScopeRetry();
+      if (typeof stopEducatorCountObservation === 'function') {
+        stopEducatorCountObservation({ invalidate: true });
+      }
       stopPolling();
+      cancelEducatorScopeProbe(true);
     } else {
-      // Force an immediate refresh on return so the user sees fresh
-      // data right away, then resume normal polling cadence.
-      refreshAll();
-      startPolling();
+      syncRealtimePolling({ resetProbe: true });
+      if (educatorScopeNeedsProbe()) runEducatorScopeProbe(true);
+      else runPeriodicRefresh(true);
+      if (typeof observeEducatorCaptureCounts === 'function' && adminSect === 'educators') {
+        observeEducatorCaptureCounts();
+      }
     }
   });
-  startPolling();
+  realtimePollingReady = true;
+  syncRealtimePolling();
 
   // ---- Menu dropdown - the button morphs into its own card ----
   var shell = document.getElementById('menuShell');
@@ -5315,7 +6407,53 @@
   var locked = document.getElementById('dd-locked');
   var items = document.getElementById('dd-items');
   var lockHint = document.getElementById('lockHint');
+  var lockTransport = document.getElementById('lockTransport');
+  var adminLock = document.getElementById('adminLock');
   var resetLiveAudioTransientState = null;
+  var stopLiveAudioNow = null;
+  var adminAccessState = 'checking';
+  var pendingAdminSection = null;
+  var adminAuthMeta = {
+    required: false, lan_policy: false, password_configured: false,
+    recovery: false, direct_local: false,
+  };
+  function normalizeAdminAuthMeta(value) {
+    value = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return {
+      required: value.required === true,
+      lan_policy: value.lan_policy === true,
+      password_configured: value.password_configured === true,
+      recovery: value.recovery === true,
+      direct_local: value.direct_local === true,
+    };
+  }
+  var ADMIN_IDLE_MS = 30 * 60 * 1000;
+  var ADMIN_ACTIVITY_PING_MS = 60 * 1000;
+  var ADMIN_ACTIVITY_PUBLISH_MS = 1000;
+  var ADMIN_ACTIVITY_KEY = 'avian:admin-activity';
+  var ADMIN_LOCK_KEY = 'avian:admin-lock';
+  var ADMIN_SESSION_KEY = 'avian:admin-session';
+  var adminIdleTimer = null;
+  var adminLastActivityAt = 0;
+  var adminLastActivityPingAt = 0;
+  var adminLastActivityPublishedAt = 0;
+  var adminActivityPublishTimer = null;
+  var adminAutoLocking = false;
+  var adminAuthGeneration = 0;
+  var adminViewGeneration = 0;
+  var adminUnlockProbeGeneration = 0;
+  var pendingAdminNotice = null;
+  var adminChannel = null;
+  var educatorsAvailable = false;
+
+  try {
+    if (window.BroadcastChannel) adminChannel = new BroadcastChannel('avian-admin-auth');
+  } catch (e) {}
+
+  if (lockTransport) {
+    var loopbackPreview = /^(localhost|127(?:[.]\d{1,3}){3}|\[?::1\]?)$/i.test(location.hostname);
+    lockTransport.hidden = location.protocol === 'https:' || loopbackPreview;
+  }
 
   var SHEET_R = 14;            // the sheet's resting corner, from styles.css
   // Reversing mid-flight should cost the travel that is left, not the
@@ -5566,48 +6704,467 @@
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
 
-  // A direct LAN request opens immediately. A public or forwarded request
-  // returns 401 until the station password establishes its private session.
+  function dismissAdminMapPickers() {
+    document.querySelectorAll('.map-modal').forEach(function (host) {
+      if (typeof host.__avianDismiss === 'function') host.__avianDismiss();
+      else host.remove();
+    });
+  }
+
+  function restoreFocusAfterAdminLock(focusNeedsPublicHome, revealDrawer) {
+    if (pendingAdminSection && revealDrawer !== false) {
+      openDd();
+      setTimeout(function () { focusEl(document.getElementById('lockPass')); }, 0);
+      return 'password';
+    }
+    if (focusNeedsPublicHome) {
+      focusEl(menuBtn);
+      return 'menu';
+    }
+    return '';
+  }
+
+  function showAdminLocked(message, recovery, revealDrawer) {
+    var wasAdminOn = document.body.classList.contains('admin-on');
+    var previousAdminSect = adminSect;
+    var focusBeforeLock = document.activeElement;
+    var scopedViewWasVisible = validEducatorScopeKey(educatorScopeId());
+    var privatePostcardWasVisible = validEducatorId(activePostcardEducatorScope);
+    var scopeReturnBeforeLock = document.getElementById('returnToEducators');
+    var sharedPublicFocus = educatorScopeShared && !!(focusBeforeLock && (
+      (views && views.contains(focusBeforeLock))
+      || (scopeReturnBeforeLock && scopeReturnBeforeLock.contains(focusBeforeLock))
+      || (privatePostcardWasVisible && postcardModal && postcardModal.contains(focusBeforeLock))
+    ));
+    var focusNeedsPublicHome = !!(focusBeforeLock && (
+      (adminEl && adminEl.contains(focusBeforeLock))
+      || (shell && shell.contains(focusBeforeLock))
+      || (scopedViewWasVisible && views && views.contains(focusBeforeLock))
+      || (scopedViewWasVisible && scopeReturnBeforeLock && scopeReturnBeforeLock.contains(focusBeforeLock))
+      || (privatePostcardWasVisible && postcardModal && postcardModal.contains(focusBeforeLock))
+      || (focusBeforeLock.closest && focusBeforeLock.closest('.map-modal'))
+    ));
+    if (previousAdminSect) pendingAdminSection = previousAdminSect;
+    if (!pendingAdminSection && typeof readAdminHash === 'function') {
+      pendingAdminSection = readAdminHash();
+    }
+    dismissAdminMapPickers();
+    suspendEducatorScopes({ refresh: true });
+    if (stopLiveAudioNow) stopLiveAudioNow();
+    if (educatorElapsedTimer) { clearInterval(educatorElapsedTimer); educatorElapsedTimer = null; }
+    if (typeof educatorStateRequest === 'number') educatorStateRequest += 1;
+    educatorState = null;
+    window.__educatorState = null;
+    educatorEditing = null;
+    educatorPendingState = null;
+    educatorActionBusy = false;
+    educatorStatusMessage = '';
+    educatorStatusError = false;
+    educatorStartDraft = '';
+    educatorFolderDraft = '';
+    educatorFolderComposerOpen = false;
+    educatorLiveWide = false;
+    educatorFocusSelector = '';
+    educatorAcceptedSignature = '';
+    educatorOlderBusy = false;
+    resetEducatorCaptureArchive();
+    lockVisibleGenerateForAuth();
+    adminAccessState = 'locked';
+    adminUnlockProbeGeneration += 1;
+    adminAuthGeneration += 1;
+    adminViewGeneration += 1;
+    if (adminIdleTimer) { clearTimeout(adminIdleTimer); adminIdleTimer = null; }
+    if (adminActivityPublishTimer) {
+      clearTimeout(adminActivityPublishTimer);
+      adminActivityPublishTimer = null;
+    }
+    discardPendingSettings();
+    document.body.classList.remove('av-local');
+    document.body.classList.add('av-forwarded');
+    if (adminPollT) { clearInterval(adminPollT); adminPollT = null; }
+    if (adminBody) adminBody.replaceChildren();
+    if (adminEl) {
+      adminEl.setAttribute('aria-hidden', 'true');
+      adminEl.inert = true;
+      adminEl.setAttribute('inert', '');
+      adminEl.scrollTop = 0;
+      adminEl.removeAttribute('data-admin-section');
+      adminEl.setAttribute('data-title-pinned', 'false');
+    }
+    if (settingsInfoCleanup) settingsInfoCleanup();
+    if (settingsAccessCleanup) settingsAccessCleanup();
+    document.body.classList.remove('admin-on');
+    adminSect = null;
+    items.classList.remove('show');
+    items.replaceChildren();
+    if (adminLock) {
+      adminLock.hidden = true;
+      adminLock.disabled = false;
+    }
+    locked.style.display = '';
+    if (wasAdminOn) queueVisibleAtlasPack();
+    lockHint.textContent = recovery
+      ? 'Admin password is missing or invalid. Over SSH, run sudo /usr/local/sbin/avian-admin-control password-reset.'
+      : (typeof message === 'string' ? message : 'Your admin session expired. Unlock to continue.');
+    lockHint.classList.toggle('lock-err', !!lockHint.textContent);
+    if (sharedPublicFocus && scopeReturnBeforeLock && !scopeReturnBeforeLock.hidden) focusEl(scopeReturnBeforeLock);
+    else restoreFocusAfterAdminLock(focusNeedsPublicHome, revealDrawer);
+  }
+
+  function AdminAuthCancelled(reason) {
+    this.name = 'AdminAuthCancelled';
+    this.message = reason || 'admin authentication changed';
+    this.adminAuthCancelled = true;
+  }
+  AdminAuthCancelled.prototype = Object.create(Error.prototype);
+  AdminAuthCancelled.prototype.constructor = AdminAuthCancelled;
+  function adminAuthCancelled(error) {
+    return !!(error && error.adminAuthCancelled);
+  }
+  function cancelledAdminRequest(reason) {
+    return Promise.reject(new AdminAuthCancelled(reason));
+  }
+
+  function guardAdminResponse(response, authGeneration, viewGeneration) {
+    ['json', 'text', 'blob', 'arrayBuffer', 'formData'].forEach(function (method) {
+      if (typeof response[method] !== 'function') return;
+      var original = response[method].bind(response);
+      try {
+        response[method] = function () {
+          return original().then(function (body) {
+            if (authGeneration !== adminAuthGeneration
+              || viewGeneration !== adminViewGeneration) {
+              throw new AdminAuthCancelled('stale admin response body');
+            }
+            return body;
+          });
+        };
+      } catch (e) {}
+    });
+    return response;
+  }
+
+  function signalAdminLock(message) {
+    var event = { type: 'lock', at: Date.now(), message: typeof message === 'string' ? message : 'Admin controls locked.' };
+    try { localStorage.setItem(ADMIN_LOCK_KEY, JSON.stringify(event)); } catch (e) {}
+    if (adminChannel) {
+      try { adminChannel.postMessage(event); } catch (e) {}
+    }
+  }
+
+  function writeAdminActivity(at) {
+    at = Math.min(Date.now(), Math.max(0, at || Date.now()));
+    adminLastActivityAt = Math.max(adminLastActivityAt, at);
+    adminLastActivityPublishedAt = Date.now();
+    try { localStorage.setItem(ADMIN_ACTIVITY_KEY, String(at)); } catch (e) {}
+    if (adminChannel) {
+      try { adminChannel.postMessage({ type: 'activity', at: at }); } catch (e) {}
+    }
+  }
+
+  function publishAdminActivity(at, immediate) {
+    var now = Date.now();
+    at = Math.min(now, Math.max(0, at || now));
+    adminLastActivityAt = Math.max(adminLastActivityAt, at);
+    var remaining = ADMIN_ACTIVITY_PUBLISH_MS - (now - adminLastActivityPublishedAt);
+    if (immediate || remaining <= 0) {
+      if (adminActivityPublishTimer) clearTimeout(adminActivityPublishTimer);
+      adminActivityPublishTimer = null;
+      writeAdminActivity(adminLastActivityAt);
+      return;
+    }
+    if (!adminActivityPublishTimer) {
+      adminActivityPublishTimer = setTimeout(function () {
+        adminActivityPublishTimer = null;
+        writeAdminActivity(adminLastActivityAt);
+      }, remaining);
+    }
+  }
+
+  function signalAdminSessionReplacement() {
+    var event = { type: 'session-replaced', at: Date.now() };
+    try { localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(event)); } catch (e) {}
+    if (adminChannel) {
+      try { adminChannel.postMessage(event); } catch (e) {}
+    }
+  }
+
+  function sessionReplaced(notice) {
+    if (notice) pendingAdminNotice = { message: notice, error: true };
+    publishAdminActivity(Date.now(), true);
+    signalAdminSessionReplacement();
+    closeDd();
+    // A same-tab policy or password update restores the Settings view as soon
+    // as the replacement HttpOnly session lands. Keep the navigation drawer
+    // closed throughout that handoff instead of briefly opening a lock form.
+    showAdminLocked('', false, false);
+    tryAutoUnlock();
+  }
+
+  function sharedAdminActivity() {
+    var stored = 0;
+    try { stored = parseInt(localStorage.getItem(ADMIN_ACTIVITY_KEY) || '0', 10) || 0; } catch (e) {}
+    if (stored > Date.now() + 60000 || stored < 0) stored = 0;
+    return Math.max(adminLastActivityAt, stored);
+  }
+
+  function receiveAdminAuthEvent(event) {
+    var data = event && event.data ? event.data : event;
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'activity' && Number.isFinite(data.at)
+      && data.at >= 0 && data.at <= Date.now() + 60000) {
+      adminLastActivityAt = Math.max(adminLastActivityAt, data.at);
+      scheduleAdminIdleLock();
+    } else if (data.type === 'lock') {
+      showAdminLocked(typeof data.message === 'string' ? data.message : 'Admin controls locked in another tab.', false);
+      // A stale request from another tab can report its old session after a
+      // policy or password change has already installed a fresh shared cookie.
+      // Recheck the server. A real logout stays locked because that probe is 401.
+      tryAutoUnlock();
+    } else if (data.type === 'session-replaced') {
+      showAdminLocked('Admin session changed in another tab.', false);
+      tryAutoUnlock();
+    }
+  }
+  if (adminChannel) adminChannel.addEventListener('message', receiveAdminAuthEvent);
+  window.addEventListener('storage', function (event) {
+    if (event.key === ADMIN_ACTIVITY_KEY) {
+      var at = parseInt(event.newValue || '0', 10) || 0;
+      receiveAdminAuthEvent({ type: 'activity', at: at });
+    } else if (event.key === ADMIN_LOCK_KEY && event.newValue) {
+      try { receiveAdminAuthEvent(JSON.parse(event.newValue)); } catch (e) {}
+    } else if (event.key === ADMIN_SESSION_KEY && event.newValue) {
+      try { receiveAdminAuthEvent(JSON.parse(event.newValue)); } catch (e) {}
+    }
+  });
+
+  function adminFetch(url, options) {
+    options = options || {};
+    if (!options.credentials) options.credentials = 'same-origin';
+    if (!options.cache) options.cache = 'no-store';
+    var requestGeneration = adminAuthGeneration;
+    var requestViewGeneration = adminViewGeneration;
+    if (adminAccessState === 'locked') return cancelledAdminRequest('admin controls are locked');
+    return fetch(url, options).then(function (response) {
+      if (requestGeneration !== adminAuthGeneration
+        || requestViewGeneration !== adminViewGeneration) {
+        return cancelledAdminRequest('stale admin response');
+      }
+      if (response.status !== 401) {
+        return guardAdminResponse(response, requestGeneration, requestViewGeneration);
+      }
+      return response.clone().json().catch(function () { return {}; }).then(function (body) {
+        if (requestGeneration !== adminAuthGeneration
+          || requestViewGeneration !== adminViewGeneration) {
+          return cancelledAdminRequest('stale admin error response');
+        }
+        showAdminLocked('Your admin session expired. Unlock to continue.', !!body.recovery);
+        signalAdminLock('Admin session expired. Unlock to continue.');
+        tryAutoUnlock();
+        return cancelledAdminRequest('admin session expired');
+      });
+    }, function (error) {
+      if (requestGeneration !== adminAuthGeneration
+        || requestViewGeneration !== adminViewGeneration) {
+        return cancelledAdminRequest('stale admin response');
+      }
+      throw error;
+    });
+  }
+
+  function pingAdminActivity() {
+    var now = Date.now();
+    if (adminAccessState !== 'unlocked' || !adminAuthMeta.required
+      || now - adminLastActivityPingAt < ADMIN_ACTIVITY_PING_MS) return;
+    adminLastActivityPingAt = now;
+    adminFetch('./avian/api/menu.php?action=activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+      body: '{}',
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+    }).catch(function (error) {
+      if (!adminAuthCancelled(error)) adminLastActivityPingAt = 0;
+    });
+  }
+
+  function lockAdminSession() {
+    return fetch('./avian/api/menu.php?action=lock', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+      body: '{}',
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response;
+    });
+  }
+
+  function idleLockAdminSession() {
+    return fetch('./avian/api/menu.php?action=idle-lock', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+      body: '{}',
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok || !body.ok) throw new Error(body.error || ('HTTP ' + response.status));
+        return body;
+      });
+    });
+  }
+
+  function scheduleAdminIdleLock() {
+    if (adminIdleTimer) clearTimeout(adminIdleTimer);
+    adminIdleTimer = null;
+    if (adminAccessState !== 'unlocked' || !adminAuthMeta.required) return;
+    adminLastActivityAt = sharedAdminActivity();
+    var remaining = ADMIN_IDLE_MS - (Date.now() - adminLastActivityAt);
+    if (remaining <= 0) {
+      if (adminAutoLocking) return;
+      adminAutoLocking = true;
+      var idleAuthGeneration = adminAuthGeneration;
+      var idleViewGeneration = adminViewGeneration;
+      idleLockAdminSession().then(function (result) {
+        if (idleAuthGeneration !== adminAuthGeneration
+          || idleViewGeneration !== adminViewGeneration) {
+          tryAutoUnlock();
+          return;
+        }
+        if (!result.locked) {
+          adminLastActivityAt = Date.now() - ADMIN_IDLE_MS + Math.max(1, result.remaining) * 1000;
+          scheduleAdminIdleLock();
+          return;
+        }
+        var message = 'Admin controls locked after 30 minutes of inactivity.';
+        showAdminLocked(message, !!result.recovery);
+        signalAdminLock(message);
+      }).catch(function () {
+        if (idleAuthGeneration !== adminAuthGeneration
+          || idleViewGeneration !== adminViewGeneration) {
+          tryAutoUnlock();
+          return;
+        }
+        showAdminLocked('Admin controls are hidden because the session status could not be checked. Unlock to continue.', false);
+      }).then(function () { adminAutoLocking = false; });
+      return;
+    }
+    adminIdleTimer = setTimeout(scheduleAdminIdleLock, remaining);
+  }
+
+  function noteAdminActivity(event) {
+    if (!event.isTrusted || adminAccessState !== 'unlocked' || !adminAuthMeta.required) return;
+    var mapPicker = event.target && event.target.closest && event.target.closest('.map-modal');
+    if (!shell.contains(event.target) && !(adminEl && adminEl.contains(event.target)) && !mapPicker) return;
+    publishAdminActivity(Date.now());
+    pingAdminActivity();
+    scheduleAdminIdleLock();
+  }
+  document.addEventListener('pointerdown', noteAdminActivity, true);
+  document.addEventListener('keydown', noteAdminActivity, true);
+  document.addEventListener('touchstart', noteAdminActivity, { capture: true, passive: true });
+  document.addEventListener('wheel', noteAdminActivity, { capture: true, passive: true });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) {
+      adminLastActivityAt = sharedAdminActivity();
+      scheduleAdminIdleLock();
+    }
+  });
+  window.addEventListener('pageshow', function () {
+    adminLastActivityAt = sharedAdminActivity();
+    scheduleAdminIdleLock();
+  });
+  function adminJson(url) {
+    return adminFetch(url).then(function (response) {
+      if (!response.ok) {
+        var error = new Error('HTTP ' + response.status);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    });
+  }
+
+  // The first request decides whether this browser needs the station password.
+  // Until it resolves, the drawer remains in its neutral locked state.
   function tryAutoUnlock() {
-    fetch('./avian/api/menu.php', { credentials: 'same-origin' }).then(function (r) {
+    var probeGeneration = ++adminUnlockProbeGeneration;
+    return fetch('./avian/api/menu.php', { credentials: 'same-origin' }).then(function (r) {
+      if (probeGeneration !== adminUnlockProbeGeneration) return;
       if (r.status === 200) {
         return r.json().then(function (j) {
-          renderMenu(j.items || []);
+          if (probeGeneration !== adminUnlockProbeGeneration) return;
+          renderMenu(j.items || [], j.auth || {});
           // Notification dot on the menu button itself when something
           // inside is waiting (instant cutouts awaiting their upgrade).
           menuBtn.classList.toggle('has-dot', (j.chroma || 0) > 0);
         });
       }
       if (r.status === 401) {
-        document.body.classList.remove('av-local');
-        document.body.classList.add('av-forwarded');
-        locked.style.display = '';
-        items.classList.remove('show');
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (probeGeneration !== adminUnlockProbeGeneration) return;
+          showAdminLocked('', !!j.recovery);
+        });
       }
     }).catch(function () { });
   }
   tryAutoUnlock();
 
+  function adminPasswordBytes(value) {
+    if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)
+      || typeof TextEncoder !== 'function') return null;
+    var bytes = new TextEncoder().encode(value);
+    return bytes.length >= 1 && bytes.length <= 64 ? bytes : null;
+  }
+
+  function adminBasicAuthorization(value) {
+    var passwordBytes = adminPasswordBytes(value);
+    if (!passwordBytes) return null;
+    var prefix = new TextEncoder().encode('birdnet:');
+    var binary = '';
+    prefix.forEach(function (byte) { binary += String.fromCharCode(byte); });
+    passwordBytes.forEach(function (byte) { binary += String.fromCharCode(byte); });
+    return 'Basic ' + btoa(binary);
+  }
+
   document.getElementById('unlockForm').addEventListener('submit', function (e) {
     e.preventDefault();
-    // BirdNET-Pi's upstream Caddyfile basicauth user is `birdnet`.
-    // If your install changed it (custom Caddyfile), set window.AV_AUTH_USER
-    // before this script loads - e.g. an inline <script> in index.html.
-    var u = (window.AV_AUTH_USER || 'birdnet');
-    var p = document.getElementById('lockPass').value;
-    var hdr = 'Basic ' + btoa(u + ':' + p);
+    var passInput = document.getElementById('lockPass');
+    var p = passInput.value;
+    var hdr = adminBasicAuthorization(p);
+    if (!hdr) {
+      passInput.value = '';
+      lockHint.textContent = 'Password must use 1 to 64 UTF-8 bytes without control characters.';
+      lockHint.classList.add('lock-err');
+      passInput.focus();
+      return;
+    }
+    passInput.value = '';
+    p = '';
     // The password is sent once. The API returns a password-bound HttpOnly
-    // session for later Settings, System, Logs, and Tools requests.
+    // session for later Settings, System, Logs, Tools, and Educators requests.
     fetch('./avian/api/menu.php', {
       method: 'POST',
-      headers: { 'Authorization': hdr },
+      headers: { 'Authorization': hdr, 'X-Avian-Credential': '1' },
       credentials: 'same-origin',
     }).then(function (r) {
       if (r.status === 200) {
-        return r.json().then(function (j) { renderMenu(j.items || []); });
+        return r.json().then(function (j) {
+          lockHint.classList.remove('lock-err');
+          lockHint.textContent = '';
+          publishAdminActivity(Date.now(), true);
+          renderMenu(j.items || [], j.auth || {});
+        });
       } else if (r.status === 401) {
-        lockHint.textContent = 'wrong password.';
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          lockHint.textContent = body.recovery
+            ? 'Admin password is missing or invalid. Over SSH, run sudo /usr/local/sbin/avian-admin-control password-reset.'
+            : 'Wrong password.';
+          lockHint.classList.add('lock-err');
+          passInput.focus();
+        });
+      } else if (r.status === 429) {
+        lockHint.textContent = 'Too many attempts. Try again shortly.';
         lockHint.classList.add('lock-err');
+        passInput.focus();
       } else {
         lockHint.textContent = 'auth unavailable.';
         lockHint.classList.add('lock-err');
@@ -5624,7 +7181,358 @@
   //   - small ADVANCED TOOLS grid for the rest of BirdNET-Pi (still
   //     opens externally; rebuilding all of these in our design is on
   //     the follow-up list)
-  function renderMenu(menu) {
+  function menuItemMarkup(it) {
+    var label = escHtml(it && it.label || '');
+    var href = escHtml(it && it.href || '');
+    var attrs = it && it.native ? '' : ' target="_blank" rel="noopener"';
+    var classes = [];
+    if (!it || !it.native) classes.push('ext');
+    if (it && it.full) classes.push('full');
+    var cls = classes.length ? ' class="' + classes.join(' ') + '"' : '';
+    var dot = it && it.dot ? '<i class="notif-dot"></i>' : '';
+    return '<a' + cls + ' href="' + href + '"' + attrs + '><span>' + label + dot + '</span></a>';
+  }
+
+  // One live player is mounted either in the drawer or on the Educators
+  // page. Mounting a new host always stops and detaches the previous stream.
+  // This preserves the app-wide one-audio-source contract and prevents a
+  // protected grant from surviving an admin lock or page transition.
+  var liveAudioController = (function () {
+    var host = null, box = null, button = null, canvas = null, status = null;
+    var audio = null, audioContext = null, source = null, analyser = null;
+    var frame = null, reconnectTimer = null, attempt = 0, earlyFailures = 0;
+    var state = 'idle', options = {}, mountProtected = null;
+    var playIcon = '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M3 2 L10 6 L3 10 Z"/></svg>';
+    var stopIcon = '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="6" height="6"/></svg>';
+    var silentWav = 'data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA';
+    function setStatus(value) { if (status) status.textContent = value || ''; }
+    function syncCanvasExpansion() {
+      if (!canvas) return;
+      var expandable = !!options.expandable;
+      var expanded = expandable && !!options.expanded;
+      if ((state !== 'playing' || !expandable)
+        && document.activeElement === canvas && button) focusEl(button);
+      if (state !== 'playing') {
+        canvas.removeAttribute('role');
+        canvas.removeAttribute('tabindex');
+        canvas.removeAttribute('aria-expanded');
+        canvas.removeAttribute('aria-label');
+        canvas.setAttribute('aria-hidden', 'true');
+      } else if (expandable) {
+        canvas.setAttribute('role', 'button');
+        canvas.setAttribute('tabindex', '0');
+        canvas.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        canvas.setAttribute('aria-label', expanded
+          ? 'Restore live microphone spectrogram' : 'Expand live microphone spectrogram');
+        canvas.removeAttribute('aria-hidden');
+      } else {
+        canvas.removeAttribute('role');
+        canvas.removeAttribute('tabindex');
+        canvas.removeAttribute('aria-expanded');
+        canvas.removeAttribute('aria-hidden');
+        canvas.setAttribute('aria-label', 'Live microphone spectrogram');
+      }
+    }
+    function setCanvasExpanded(expanded) {
+      if (!options.expandable) return false;
+      expanded = !!expanded;
+      if (typeof options.onExpandedChange === 'function') {
+        var accepted = options.onExpandedChange(expanded);
+        if (accepted === false) return false;
+      }
+      options.expanded = expanded;
+      syncCanvasExpansion();
+      return true;
+    }
+    function quietCanvas() {
+      if (!canvas || !canvas.getContext) return;
+      var context = canvas.getContext('2d');
+      context.fillStyle = getComputedStyle(document.documentElement)
+        .getPropertyValue('--paper-2').trim() || '#efe8d8';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    function stop(preserveAudio) {
+      preserveAudio = preserveAudio === true;
+      attempt += 1;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      audioRelease(stop);
+      if (frame) { cancelAnimationFrame(frame); frame = null; }
+      if (audio) {
+        try { audio.pause(); } catch (e) { }
+        audio.removeAttribute('src');
+        try { audio.load(); } catch (e) { }
+      }
+      if (!preserveAudio) {
+        if (source) { try { source.disconnect(); } catch (e) { } }
+        if (analyser) { try { analyser.disconnect(); } catch (e) { } }
+        audio = null;
+        source = null;
+        analyser = null;
+      }
+      state = 'idle';
+      if (options.expandable && options.expanded) setCanvasExpanded(false);
+      if (box) {
+        box.setAttribute('data-on', 'false');
+        box.setAttribute('data-state', 'idle');
+      }
+      if (button) {
+        button.removeAttribute('aria-busy');
+        button.removeAttribute('aria-disabled');
+        button.setAttribute('aria-label', 'Listen to live audio');
+        button.innerHTML = playIcon + '<span>listen</span>';
+      }
+      setStatus('');
+      quietCanvas();
+      syncCanvasExpansion();
+    }
+    function unmount() {
+      stop();
+      if (host) host.replaceChildren();
+      host = null; box = null; button = null; canvas = null; status = null;
+      mountProtected = null;
+    }
+    function rgb(value, fallback) {
+      if (!canvas) return [0, 0, 0];
+      var context = canvas.getContext('2d');
+      context.fillStyle = fallback;
+      context.fillStyle = value;
+      var normalized = context.fillStyle;
+      if (normalized.charAt(0) === '#') {
+        return [parseInt(normalized.slice(1, 3), 16), parseInt(normalized.slice(3, 5), 16), parseInt(normalized.slice(5, 7), 16)];
+      }
+      var match = normalized.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+      return match ? [+match[1], +match[2], +match[3]] : [0, 0, 0];
+    }
+    function paint() {
+      if (!canvas || !analyser) return;
+      if (frame) { cancelAnimationFrame(frame); frame = null; }
+      var context = canvas.getContext('2d');
+      var width = canvas.width, height = canvas.height;
+      var css = getComputedStyle(document.documentElement);
+      var paper = css.getPropertyValue('--paper-2').trim() || '#efe8d8';
+      var background = rgb(paper, '#efe8d8');
+      var foreground = rgb(css.getPropertyValue('--ink').trim() || '#1a1612', '#1a1612');
+      var bins = new Uint8Array(analyser.frequencyBinCount);
+      context.fillStyle = paper;
+      context.fillRect(0, 0, width, height);
+      function tick() {
+        if (!analyser || !canvas) return;
+        var image = context.getImageData(1, 0, width - 1, height);
+        context.putImageData(image, 0, 0);
+        analyser.getByteFrequencyData(bins);
+        var low = Math.floor(bins.length * 250 / 24000);
+        var high = Math.floor(bins.length * 12000 / 24000);
+        for (var y = 0; y < height; y++) {
+          var position = 1 - y / height;
+          var bin = Math.round(low + (high - low) * Math.pow(position, 1.6));
+          var value = (bins[bin] || 0) / 255;
+          var energy = value * value * (3 - 2 * value);
+          context.fillStyle = 'rgb('
+            + (background[0] + Math.round((foreground[0] - background[0]) * energy)) + ','
+            + (background[1] + Math.round((foreground[1] - background[1]) * energy)) + ','
+            + (background[2] + Math.round((foreground[2] - background[2]) * energy)) + ')';
+          context.fillRect(width - 1, y, 1, 1);
+        }
+        frame = requestAnimationFrame(tick);
+      }
+      tick();
+    }
+    function attachAnalyser() {
+      var AudioContextType = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextType || !audio) return;
+      if (!audioContext) audioContext = new AudioContextType();
+      if (audioContext.state === 'suspended') audioContext.resume();
+      if (!source) {
+        try { source = audioContext.createMediaElementSource(audio); } catch (e) { return; }
+      }
+      if (!analyser) {
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.7;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+      }
+      paint();
+    }
+    function validateGrantUrl(value) {
+      try {
+        var parsed = new URL(value, location.href);
+        if (parsed.origin !== location.origin || parsed.pathname !== '/avian/api/educator-audio.php') return '';
+        return parsed.href;
+      } catch (e) { return ''; }
+    }
+    function streamUrl() {
+      if (!options.protectedStream) return Promise.resolve('/stream?t=' + Date.now());
+      var revision = window.__educatorState && window.__educatorState.state_revision;
+      return adminFetch('./avian/api/educators.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+        body: JSON.stringify({ action: 'audio-grant', state_revision: revision }),
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          var url = response.ok && body.ok !== false ? validateGrantUrl(body.url) : '';
+          if (!url) throw new Error(body.error || 'live audio unavailable');
+          return url;
+        });
+      });
+    }
+    function blessProtectedAudio() {
+      if (!audio) audio = new Audio();
+      var AudioContextType = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextType && !audioContext) audioContext = new AudioContextType();
+      if (audioContext && audioContext.state === 'suspended') audioContext.resume();
+      audio.loop = true;
+      audio.muted = false;
+      audio.src = silentWav;
+      var blessing = audio.play();
+      if (blessing && blessing.catch) blessing.catch(function () { });
+    }
+    function unavailable() {
+      stop();
+      state = 'error';
+      if (box) box.setAttribute('data-state', 'error');
+      if (button) {
+        button.removeAttribute('aria-disabled');
+        button.setAttribute('aria-label', 'Retry live audio');
+        button.innerHTML = '<span>retry</span>';
+      }
+      setStatus('Live audio unavailable.');
+    }
+    function recoverStream(established) {
+      stop(true);
+      if (!options.protectedStream) {
+        unavailable();
+        return;
+      }
+      if (!established && earlyFailures >= 1) {
+        unavailable();
+        return;
+      }
+      earlyFailures = established ? 0 : earlyFailures + 1;
+      var retryAttempt = attempt;
+      reconnectTimer = setTimeout(function () {
+        reconnectTimer = null;
+        if (retryAttempt !== attempt || !host) return;
+        connect(true);
+      }, established ? 300 : 0);
+    }
+    function connect(retry) {
+      if (!retry) earlyFailures = 0;
+      var token = ++attempt;
+      state = 'connecting';
+      box.setAttribute('data-on', 'true');
+      box.setAttribute('data-state', 'connecting');
+      button.setAttribute('aria-busy', 'true');
+      button.setAttribute('aria-label', 'Stop live audio');
+      button.innerHTML = stopIcon + '<span>stop</span>';
+      setStatus('connecting...');
+      if (!audio) audio = new Audio();
+      // A protected grant arrives after this click. Start one persistent
+      // media element now so Safari and iOS preserve the click's playback
+      // permission when the real one-use URL arrives.
+      if (options.protectedStream && !retry) blessProtectedAudio();
+      audioClaim(stop);
+      streamUrl().then(function (url) {
+        if (token !== attempt || state !== 'connecting') return;
+        try { audio.pause(); } catch (e) { }
+        audio.loop = false;
+        audio.muted = false;
+        audio.src = url;
+        try { audio.load(); } catch (e) { }
+        audio.addEventListener('playing', function () {
+          if (token !== attempt || !audio) return;
+          state = 'playing';
+          earlyFailures = 0;
+          box.setAttribute('data-state', 'streaming');
+          button.removeAttribute('aria-busy');
+          setStatus('live now');
+          syncCanvasExpansion();
+          attachAnalyser();
+        }, { once: true });
+        audio.addEventListener('error', function () {
+          if (token !== attempt) return;
+          recoverStream(state === 'playing');
+        }, { once: true });
+        audio.addEventListener('ended', function () {
+          if (token !== attempt) return;
+          recoverStream(state === 'playing');
+        }, { once: true });
+        var playPromise = audio.play();
+        if (playPromise && playPromise.catch) playPromise.catch(function () {
+          if (token !== attempt) return;
+          recoverStream(false);
+        });
+      }).catch(function (error) {
+        if (token !== attempt || adminAuthCancelled(error)) return;
+        unavailable();
+      });
+    }
+    function mount(nextHost, nextOptions) {
+      var nextProtected = !!(nextOptions && nextOptions.protectedStream);
+      if (host === nextHost && mountProtected === nextProtected && box && nextHost.contains(box)) {
+        options = nextOptions || {};
+        syncCanvasExpansion();
+        return;
+      }
+      unmount();
+      host = nextHost;
+      options = nextOptions || {};
+      mountProtected = nextProtected;
+      host.innerHTML = '<div class="live-audio" data-on="false" data-state="idle">'
+        + '<div class="pulse" aria-hidden="true"></div>'
+        + '<div class="label">Live audio<span class="hint">raw microphone stream</span></div>'
+        + '<button type="button" data-live-audio-toggle aria-label="Listen to live audio">' + playIcon + '<span>listen</span></button>'
+        + '</div>'
+        + '<canvas class="live-spectro" width="900" height="180" aria-label="Live microphone spectrogram"></canvas>'
+        + '<div class="live-status" role="status" aria-live="polite" aria-atomic="true"></div>';
+      box = host.querySelector('.live-audio');
+      button = host.querySelector('.live-audio button');
+      canvas = host.querySelector('.live-spectro');
+      status = host.querySelector('.live-status');
+      canvas.__refreshTheme = function () { if (analyser) paint(); else quietCanvas(); };
+      syncCanvasExpansion();
+      quietCanvas();
+      button.addEventListener('click', function (event) {
+        event.stopPropagation();
+        if (state === 'connecting' || state === 'playing') stop();
+        else connect(false);
+      });
+      canvas.addEventListener('click', function () {
+        if (state === 'playing' && options.expandable) setCanvasExpanded(!options.expanded);
+      });
+      canvas.addEventListener('keydown', function (event) {
+        if (state !== 'playing' || !options.expandable
+          || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        setCanvasExpanded(!options.expanded);
+      });
+    }
+    return { mount: mount, stop: stop, unmount: unmount };
+  })();
+  stopLiveAudioNow = liveAudioController.stop;
+  resetLiveAudioTransientState = liveAudioController.stop;
+
+  function suspendUnavailableEducatorProfile(lostEducators) {
+    suspendEducatorScopes({ refresh: true });
+    requestDisplayMode(false);
+    if (lostEducators) clearEducatorPrivateFrontendState();
+    if (pendingAdminSection === 'educators') pendingAdminSection = null;
+    if (adminSect === 'educators') closeAdmin({ focusPublicEducator: true });
+    if (location.hash === '#admin=educators' && window.history && history.replaceState) {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+
+  function renderMenu(menu, auth) {
+    adminUnlockProbeGeneration += 1;
+    adminAccessState = 'unlocked';
+    adminAuthMeta = normalizeAdminAuthMeta(auth);
+    adminLastActivityAt = sharedAdminActivity() || Date.now();
+    scheduleAdminIdleLock();
+    resumeVisibleGenerateAfterAuth();
+    if (adminAuthMeta.lan_policy && stopLiveAudioNow) stopLiveAudioNow();
+    document.body.classList.toggle('av-local', !adminAuthMeta.required);
+    document.body.classList.toggle('av-forwarded', !!adminAuthMeta.required);
     locked.style.display = 'none';
     items.classList.add('show');
     var audioHost = location.hostname.toLowerCase();
@@ -5638,36 +7546,47 @@
         || (audioOctets[0] === 169 && audioOctets[1] === 254)
         || (audioOctets[0] === 172 && audioOctets[1] >= 16 && audioOctets[1] <= 31)
         || (audioOctets[0] === 192 && audioOctets[1] === 168)));
-    var liveAudioIcon = '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true" focusable="false"><path d="M3 2 L10 6 L3 10 Z"/></svg>';
-    var stopIcon = '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true" focusable="false"><rect x="3" y="3" width="6" height="6"/></svg>';
-    var specOnIcon = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 9 L4 5 L6 8 L8 3 L10 7"/></svg>';
     // Build the diagnostic shortcuts (system / logs / tools). With
     // native:true they navigate in-page; otherwise they keep the old
     // open-in-new-tab behavior for the legacy BirdNET-Pi screens.
-    var linksHtml = menu.map(function (it) {
-      var label = (it.label || '');
-      var attrs = it.native ? '' : ' target="_blank" rel="noopener"';
-      var cls = it.native ? '' : ' class="ext"';
-      // A dot marks a section with something waiting (e.g. instant
-      // cutouts ready for their upgrade pass in settings).
-      var dot = it.dot ? '<i class="notif-dot"></i>' : '';
-      return '<a' + cls + ' href="' + it.href + '"' + attrs + '><span>' + label + dot + '</span></a>';
-    }).join('');
-    var liveAudioHtml = localAudio ?
-      '<div class="live-audio" id="liveAudio" data-on="false" data-state="idle">'
-      + '  <div class="pulse"></div>'
-      + '  <div class="label">Live audio<span class="hint">stream from the mic</span></div>'
-      + '  <button type="button" id="liveAudioBtn" aria-live="polite" aria-atomic="true" aria-label="listen to live audio">'
-      + liveAudioIcon + '<span>listen</span>'
-      + '  </button>'
-      + '</div>'
-      // Spectrogram canvas is always present; it stays a dark inert
-      // strip until the stream is on, then the FFT loop paints it in
-      // real time. No separate toggle.
-      + '<canvas class="live-spectro" id="liveSpectro" width="600" height="120" aria-label="live spectrogram"></canvas>'
-      + '<div class="live-status" id="liveStatus" role="status" aria-live="polite" aria-atomic="true"></div>'
-      : '';
+    var linksHtml = menu.map(menuItemMarkup).join('');
+    var nextEducatorsAvailable = menu.some(function (item) {
+      return !!(item && item.native && /#admin=educators$/.test(String(item.href || '')));
+    });
+    var lostEducators = educatorsAvailable && !nextEducatorsAvailable;
+    educatorsAvailable = nextEducatorsAvailable;
+    if (educatorsAvailable) {
+      authorizeEducatorScopes();
+      restoreDisplayModePreference();
+    } else {
+      suspendUnavailableEducatorProfile(lostEducators);
+    }
+    if (adminAuthMeta.lan_policy) localAudio = false;
+    var liveAudioHtml = localAudio ? '<div data-live-audio-host></div>' : '';
     items.innerHTML = liveAudioHtml + '<div class="menu-links">' + linksHtml + '</div>';
+
+    if (adminLock) {
+      adminLock.hidden = !adminAuthMeta.required;
+      adminLock.disabled = false;
+      adminLock.onclick = function () {
+        adminLock.disabled = true;
+        lockAdminSession().then(function () {
+          showAdminLocked('', false);
+          signalAdminLock('');
+        }).catch(function () {
+          adminLock.disabled = false;
+        });
+      };
+    }
+
+    if (pendingAdminSection) {
+      var destination = pendingAdminSection;
+      pendingAdminSection = null;
+      setTimeout(function () { openAdmin(destination); }, 0);
+    }
+    if (educatorsAvailable && location.hash === '#admin=educators' && adminSect !== 'educators') {
+      setTimeout(function () { openAdmin('educators'); }, 0);
+    }
 
     // Clicking a nav link (settings / system / logs / tools) collapses the
     // menu back into the button - it has opened (or navigated to) its page,
@@ -5678,206 +7597,11 @@
     if (menuLinks) menuLinks.addEventListener('click', function (ev) {
       if (ev.target.closest('a')) closeDd();
     });
-    if (!localAudio) {
-      resetLiveAudioTransientState = function () {};
-      return;
-    }
-
-    // Live audio + realtime spectrogram. The audio element and the
-    // FFT analyser share one AudioContext; once .play() is called the
-    // analyser starts painting the canvas via rAF. No timeout - we
-    // surface the natural error event or success ("playing") only.
-    var liveBox = document.getElementById('liveAudio');
-    var liveBtn = document.getElementById('liveAudioBtn');
-    var spectroEl = document.getElementById('liveSpectro');
-    var statusEl = document.getElementById('liveStatus');
-    var liveEl = null, audioCtx = null, srcNode = null, analyser = null;
-    var specRaf = null;
-    var liveAttempt = 0, liveState = 'idle';
-
-    function setStatus(msg) {
-      statusEl.textContent = msg || '';
-      statusEl.className = 'live-status';
-    }
-    function startAudio() {
-      // Create the Audio element and resolve on the first "playing"
-      // event (success). The browser will hang the network request
-      // open for an icecast stream - that's normal - and "playing"
-      // fires as soon as the first audio frame is decoded. We don't
-      // race a timeout because icecast can take 1-10s to warm up
-      // depending on tunnel + bitrate.
-      return new Promise(function (resolve, reject) {
-        liveEl = new Audio('/stream?t=' + Date.now());
-        // No crossOrigin - the stream is same-origin via the worker
-        // and crossOrigin='anonymous' would require CORS headers
-        // icecast doesn't send.
-        var settled = false;
-        liveEl.addEventListener('playing', function () {
-          if (settled) return;
-          settled = true; resolve();
-        });
-        liveEl.addEventListener('error', function () {
-          if (settled) return;
-          settled = true;
-          reject(new Error('stream error - check /#admin=system'));
-        });
-        audioClaim(stopAudio);   // stop any card / modal-recording audio
-        liveEl.play().catch(function (e) {
-          if (settled) return;
-          settled = true; reject(e);
-        });
-      });
-    }
-    function paintQuietSpectrogram() {
-      var ctx = spectroEl.getContext('2d');
-      ctx.fillStyle = getComputedStyle(document.documentElement)
-        .getPropertyValue('--paper-2').trim() || '#efe8d8';
-      ctx.fillRect(0, 0, spectroEl.width, spectroEl.height);
-    }
-    function stopAudio() {
-      liveAttempt++;
-      audioRelease(stopAudio);
-      if (specRaf) { cancelAnimationFrame(specRaf); specRaf = null; }
-      if (liveEl) { try { liveEl.pause(); } catch (e) { } liveEl.src = ''; liveEl = null; }
-      if (srcNode) { try { srcNode.disconnect(); } catch (e) { } srcNode = null; }
-      if (analyser) { try { analyser.disconnect(); } catch (e) { } analyser = null; }
-      liveState = 'idle';
-      liveBox.setAttribute('data-on', 'false');
-      liveBox.setAttribute('data-state', 'idle');
-      liveBtn.removeAttribute('aria-disabled');
-      liveBtn.removeAttribute('aria-busy');
-      liveBtn.setAttribute('aria-label', 'listen to live audio');
-      liveBtn.innerHTML = liveAudioIcon + '<span>listen</span>';
-      setStatus('');
-      // Clear the spectrogram canvas so it returns to its quiet state.
-      paintQuietSpectrogram();
-    }
-    function showAudioUnavailable() {
-      stopAudio();
-      liveState = 'error';
-      liveBox.setAttribute('data-state', 'error');
-      liveBtn.setAttribute('aria-disabled', 'true');
-      liveBtn.setAttribute('aria-label', 'Live audio unavailable. Close and reopen the menu to retry.');
-      liveBtn.innerHTML = '<span>unavailable</span>';
-      setStatus('');
-    }
-    resetLiveAudioTransientState = function () {
-      if (liveState === 'connecting' || liveState === 'error') stopAudio();
-    };
-    function attachSpectrogram() {
-      if (!liveEl) return;
-      if (!audioCtx) {
-        var Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return;
-        audioCtx = new Ctx();
-      }
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      try {
-        srcNode = audioCtx.createMediaElementSource(liveEl);
-      } catch (e) {
-        // MediaElementSource throws if the Audio is already wired up
-        // (e.g. user toggled listen off then on). Best effort - let
-        // the audio still play, just skip the spectrogram.
-        return;
-      }
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.7;
-      srcNode.connect(analyser);
-      analyser.connect(audioCtx.destination);
-      drawSpectrogram();
-    }
-    // Convert a CSS colour token (hex or rgb()) to [r,g,b] by letting the 2d
-    // context normalise whatever form the variable is authored in.
-    function toRGB(str, fallback) {
-      var c = spectroEl.getContext('2d');
-      c.fillStyle = fallback; c.fillStyle = str;   // invalid str leaves fallback
-      var s = c.fillStyle;
-      if (s.charAt(0) === '#') return [parseInt(s.substr(1, 2), 16), parseInt(s.substr(3, 2), 16), parseInt(s.substr(5, 2), 16)];
-      var m = s.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-      return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
-    }
-    function drawSpectrogram() {
-      var ctx = spectroEl.getContext('2d');
-      var W = spectroEl.width, H = spectroEl.height;
-      // Read palette tokens so the live spectrogram follows the theme - a
-      // charcoal ground with a light trace in dark mode, not a hardcoded
-      // light-mode ramp - matching the recording-row + card spectrograms.
-      var cs = getComputedStyle(document.documentElement);
-      var paper = cs.getPropertyValue('--paper-2').trim() || '#efe8d8';
-      var bg = toRGB(paper, '#efe8d8');
-      var fg = toRGB(cs.getPropertyValue('--ink').trim() || '#1a1612', '#1a1612');
-      ctx.fillStyle = paper;
-      ctx.fillRect(0, 0, W, H);
-      var bins = new Uint8Array(analyser.frequencyBinCount);
-      function tick() {
-        if (!analyser) return;
-        var img = ctx.getImageData(1, 0, W - 1, H);
-        ctx.putImageData(img, 0, 0);
-        ctx.clearRect(W - 1, 0, 1, H);
-        analyser.getByteFrequencyData(bins);
-        var n = bins.length;
-        var lo = Math.floor(n * 250 / 24000);
-        var hi = Math.floor(n * 12000 / 24000);
-        for (var y = 0; y < H; y++) {
-          var t = 1 - y / H;
-          var idx = Math.round(lo + (hi - lo) * Math.pow(t, 1.6));
-          var v = (bins[idx] || 0) / 255;
-          var e = v * v * (3 - 2 * v);
-          // Ground (paper) -> trace (ink) ramp, per the active theme.
-          var r = bg[0] + Math.round((fg[0] - bg[0]) * e);
-          var g = bg[1] + Math.round((fg[1] - bg[1]) * e);
-          var b = bg[2] + Math.round((fg[2] - bg[2]) * e);
-          ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
-          ctx.fillRect(W - 1, y, 1, 1);
-        }
-        specRaf = requestAnimationFrame(tick);
-      }
-      tick();
-    }
-
-    // Keep both the quiet strip and an active stream in step with theme
-    // changes. Restarting the painter clears old-theme pixels immediately.
-    spectroEl.__refreshTheme = function () {
-      if (specRaf) { cancelAnimationFrame(specRaf); specRaf = null; }
-      if (analyser) drawSpectrogram();
-      else paintQuietSpectrogram();
-    };
-    paintQuietSpectrogram();
-
-    liveBtn.addEventListener('click', function (ev) {
-      // Important: stop the click from propagating up to the
-      // document-level "click outside drawer" handler, which would
-      // close the dropdown.
-      ev.stopPropagation();
-      var on = liveBox.getAttribute('data-on') === 'true';
-      if (liveState === 'error') return;
-      if (on) { stopAudio(); return; }
-      liveState = 'connecting';
-      var attempt = ++liveAttempt;
-      liveBox.setAttribute('data-on', 'true');
-      liveBox.setAttribute('data-state', 'connecting');
-      liveBtn.setAttribute('aria-busy', 'true');
-      liveBtn.setAttribute('aria-label', 'stop live audio');
-      liveBtn.innerHTML = stopIcon + '<span>stop</span>';
-      setStatus('connecting...');
-      startAudio()
-        .then(function () {
-          if (attempt !== liveAttempt) return;
-          liveState = 'playing';
-          liveBox.setAttribute('data-state', 'streaming');
-          liveBtn.removeAttribute('aria-busy');
-          setStatus('live now');
-          attachSpectrogram();
-        })
-        .catch(function () {
-          if (attempt !== liveAttempt) return;
-          showAudioUnavailable();
-        });
-    });
+    var liveAudioHost = items.querySelector('[data-live-audio-host]');
+    if (liveAudioHost) liveAudioController.mount(liveAudioHost, { protectedStream: false });
+    else liveAudioController.unmount();
   }
-
-  // Pending changes (key -> value), saved on click of the Save button.
+  // Pending changes (key -> value), written by the serialized autosave queue.
   var pending = {};
 
   function setSaveState(msg, cls) {
@@ -5888,11 +7612,23 @@
   // so the delay is long enough that a slider being dragged or a key being
   // typed settles into one write rather than a burst of them.
   var autoSaveT = null;
+  var settingsSaveBusy = false;
+  function discardPendingSettings() {
+    if (autoSaveT) clearTimeout(autoSaveT);
+    autoSaveT = null;
+    pending = {};
+    setSaveState('');
+  }
+  function restoreSubmittedSettings(submitted) {
+    Object.keys(submitted).forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(pending, key)) pending[key] = submitted[key];
+    });
+  }
   function queueSave(delay) {
     if (!Object.keys(pending).length) return;
     setSaveState('saving...');
     clearTimeout(autoSaveT);
-    autoSaveT = setTimeout(saveSettings, delay || 700);
+    autoSaveT = setTimeout(saveSettings, typeof delay === 'number' ? delay : 700);
   }
 
   // The range filter scores each species against where and when the
@@ -5929,6 +7665,15 @@
       + '  <input type="password" class="secret" data-key="' + key + '" autocomplete="off" '
       + 'placeholder="' + (isSet ? 'saved, paste to replace' : 'paste key') + '">'
       + '</div>';
+  }
+  function settingsText(key, label, value, maxLength) {
+    return ''
+      + '<label class="menu-row settings-text-row">'
+      + '  <span class="label">' + adminEsc(label) + '</span>'
+      + '  <input type="text" class="settings-text" data-key="' + adminAttr(key) + '"'
+      + '    value="' + adminAttr(value || '') + '" maxlength="' + (maxLength || 60) + '"'
+      + '    autocomplete="off" spellcheck="false">'
+      + '</label>';
   }
   function settingsToggle(key, label, hint, on) {
     return ''
@@ -5977,34 +7722,139 @@
       + '  <div class="seg" data-key="' + key + '"><i class="seg-pill" aria-hidden="true"></i>' + btns + '</div>'
       + '</div>';
   }
+  function settingsInfoMarkup(id, label, details) {
+    return ''
+      + '<button type="button" class="settings-info" data-settings-info'
+      + ' aria-label="' + label + '" aria-describedby="' + id + '"'
+      + ' aria-controls="' + id + '" aria-expanded="false">'
+      + '  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><path d="M8 7.1v4M8 4.75h.01" stroke-linecap="round"/></svg>'
+      + '  <span class="settings-tip" id="' + id + '" role="tooltip">' + details + '</span>'
+      + '</button>';
+  }
+  var settingsInfoCleanup = null;
+  var settingsAccessCleanup = null;
+  function wireSettingsInfo(scope) {
+    if (settingsInfoCleanup) settingsInfoCleanup();
+    var buttons = [].slice.call(scope.querySelectorAll('[data-settings-info]'));
+    function setOpen(button, open) {
+      if (!button) return;
+      button.setAttribute('aria-expanded', open ? 'true' : 'false');
+      var wrapper = button.closest('.access-copy');
+      if (wrapper) wrapper.setAttribute('data-tip-open', open ? 'true' : 'false');
+    }
+    function closeAll(except) {
+      buttons.forEach(function (button) {
+        if (button !== except) {
+          button.__tipPinned = false;
+          setOpen(button, false);
+        }
+      });
+    }
+    buttons.forEach(function (button) {
+      button.__tipPinned = false;
+      button.__tipSuppressed = false;
+      button.addEventListener('pointerenter', function () {
+        if (!button.__tipSuppressed) setOpen(button, true);
+      });
+      button.addEventListener('pointerleave', function () {
+        button.__tipSuppressed = false;
+        if (!button.__tipPinned && document.activeElement !== button) setOpen(button, false);
+      });
+      button.addEventListener('focus', function () {
+        button.__tipSuppressed = false;
+        closeAll(button);
+        setOpen(button, true);
+      });
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAll(button);
+        button.__tipPinned = !button.__tipPinned;
+        button.__tipSuppressed = !button.__tipPinned;
+        setOpen(button, button.__tipPinned);
+      });
+      button.addEventListener('focusout', function () {
+        setTimeout(function () {
+          var wrapper = button.closest('.access-copy');
+          if (!wrapper || !wrapper.contains(document.activeElement)) {
+            button.__tipPinned = false;
+            setOpen(button, false);
+          }
+        }, 0);
+      });
+    });
+    function outside(event) {
+      if (!event.target.closest('[data-settings-info]')) closeAll(null);
+    }
+    function escape(event) {
+      if (event.key !== 'Escape') return;
+      var open = buttons.find(function (button) {
+        return button.getAttribute('aria-expanded') === 'true';
+      });
+      if (!open) return;
+      event.stopPropagation();
+      open.__tipPinned = false;
+      open.__tipSuppressed = true;
+      setOpen(open, false);
+    }
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', escape, true);
+    settingsInfoCleanup = function () {
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', escape, true);
+      settingsInfoCleanup = null;
+    };
+  }
   // Client-side theme switcher row. Reuses the .seg look but is tagged
-  // data-theme-seg so wireSettingsControls skips it - it applies instantly
-  // and is NOT part of the Pi config save flow.
+  // data-theme-seg so wireSettingsControls skips it. It applies instantly
+  // and is not part of the Pi config save flow.
   function themeRow() {
     var cur = themePreference();
-    var btn = function (v, label) {
-      return '<button type="button" data-theme="' + v + '" aria-current="' + (cur === v ? 'true' : 'false') + '">' + label + '</button>';
+    var icons = {
+      auto: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="8.5" rx="1.5"/><path d="M5.25 13.5h5.5M8 11v2.5"/></svg>',
+      light: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v1.25M8 13.25v1.25M1.5 8h1.25M13.25 8h1.25M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/></svg>',
+      dark: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.2 10.6A5.5 5.5 0 0 1 5.4 3.8a5.5 5.5 0 1 0 6.8 6.8Z"/></svg>'
+    };
+    var btn = function (v, label, tip) {
+      var id = 'theme' + v.charAt(0).toUpperCase() + v.slice(1) + 'Tip';
+      return '<button type="button" data-theme="' + v + '" aria-current="' + (cur === v ? 'true' : 'false') + '" aria-label="' + label + '" aria-describedby="' + id + '">'
+        + icons[v] + '<span class="tip" id="' + id + '" role="tooltip">' + tip + '</span></button>';
     };
     return ''
       + '<div class="menu-row">'
-      + '  <div><span class="label">Theme</span><span class="hint">auto follows your system</span></div>'
-      + '  <div class="seg" data-theme-seg><i class="seg-pill" aria-hidden="true"></i>' + btn('auto', 'auto') + btn('light', 'light') + btn('dark', 'dark') + '</div>'
+      + '  <div><span class="label">Theme</span></div>'
+      + '  <div class="seg settings-theme-seg" data-theme-seg role="group" aria-label="Theme"><i class="seg-pill" aria-hidden="true"></i>'
+      + btn('auto', 'Follow system theme', 'follow system') + btn('light', 'Use light theme', 'light') + btn('dark', 'Use dark theme', 'dark') + '</div>'
       + '</div>';
   }
-  // Client-side collage-labels switcher; same instant-apply pattern as
-  // the theme row (data-labels-seg keeps it out of the Pi config flow).
+  // Client-side collage-label switch. It applies instantly and remains a
+  // browser preference rather than part of the Pi config save flow.
   function labelsRow() {
     // Same default as labelsOn(), or the switch reads off on a fresh device
     // while the collage is drawing names.
     var cur = readLS('bird:labels', 'on');
-    var btn = function (v, label) {
-      return '<button type="button" data-labels="' + v + '" aria-current="' + (cur === v ? 'true' : 'false') + '">' + label + '</button>';
-    };
     return ''
       + '<div class="menu-row">'
       + '  <div><span class="label">Bird names</span><span class="hint">show names alongside birds in the collage</span></div>'
-      + '  <div class="seg" data-labels-seg><i class="seg-pill" aria-hidden="true"></i>' + btn('off', 'off') + btn('on', 'on') + '</div>'
+      + '  <button type="button" class="switch" role="switch" aria-label="Show bird names"'
+      + '    aria-checked="' + (cur === 'on' ? 'true' : 'false') + '" data-labels-switch></button>'
       + '</div>';
+  }
+  function wireLabelsPreference(scope) {
+    var labelsSwitch = scope.querySelector('[data-labels-switch]');
+    if (!labelsSwitch) return;
+    labelsSwitch.addEventListener('click', function () {
+      var on = labelsSwitch.getAttribute('aria-checked') !== 'true';
+      labelsSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+      writeLS('bird:labels', on ? 'on' : 'off');
+      if (document.fonts && document.fonts.load) {
+        document.fonts.load('600 16px Hand').then(function () {
+          labelFontReady = true; renderCollageFromData();
+        }).catch(function () { labelFontReady = true; renderCollageFromData(); });
+      } else {
+        labelFontReady = true; renderCollageFromData();
+      }
+    });
   }
   function atlasAlwaysAllRow() {
     var on = atlasAlwaysAll();
@@ -6015,9 +7865,838 @@
       + '    aria-checked="' + (on ? 'true' : 'false') + '" data-atlas-always-all></button>'
       + '</div>';
   }
+  function atlasClassicRow() {
+    var on = atlasUsesClassicCards();
+    return ''
+      + '<div class="menu-row">'
+      + '  <div><span class="label">Classic Atlas cards</span></div>'
+      + '  <button type="button" class="switch" role="switch" aria-label="Classic Atlas cards"'
+      + '    aria-checked="' + (on ? 'true' : 'false') + '" data-atlas-classic></button>'
+      + '</div>';
+  }
+  function lanAuthRow(security) {
+    security = security || {};
+    var on = !!security.lan_admin_auth;
+    var configured = !!security.password_configured;
+    var reconciliationNeeded = !!security.policy_reconciliation_needed;
+    var hint = reconciliationNeeded
+      ? 'the loaded access policy differs from this saved setting'
+      : configured
+      ? 'lock Settings, System, Logs, and Tools on direct local connections'
+      : 'From SSH, run: sudo /usr/local/sbin/avian-admin-control password-reset';
+    var details = hint + '. Collage, Atlas, Stats, and recordings stay public. On plain HTTP, this blocks casual access '
+      + 'but does not protect your password from a hostile network.';
+    var canChangePassword = on && configured;
+    return ''
+      + '<div class="lan-auth-control" data-lan-auth-control' + (canChangePassword ? ' data-password-change' : '') + '>'
+      + '  <div class="menu-row">'
+      + '    <div class="access-copy"><span class="label">Require password on local network</span>'
+      + settingsInfoMarkup('lanAuthTip', 'About local password protection', details)
+      + '    </div>'
+      + '    <div class="lan-auth-head-actions">'
+      + (canChangePassword
+        ? '      <button type="button" class="settings-disclosure" data-password-change-open aria-controls="passwordChangeForm" aria-expanded="false">change admin password</button>'
+        : '')
+      + '    <button type="button" class="switch" role="switch" data-lan-auth'
+      + '      aria-label="Require password on local network" aria-describedby="lanAuthTip"'
+      + '      aria-checked="' + (on ? 'true' : 'false') + '"'
+      + ((!configured && !on) ? ' disabled' : '') + '></button>'
+      + '    </div>'
+      + '  </div>'
+      + (reconciliationNeeded
+        ? '  <button type="button" class="chip lan-auth-reconcile" data-lan-auth-reconcile>reapply saved access setting</button>'
+        : '')
+      + '  <form class="lan-auth-confirm" data-lan-auth-confirm hidden>'
+      + '    <label for="lanAuthPassword">Confirm your admin password</label>'
+      + '    <div><span class="lan-password-field"><input id="lanAuthPassword" type="password" autocomplete="current-password">'
+      + '      <button type="button" class="lan-password-visibility" data-lan-password-visibility aria-label="Show admin password" aria-pressed="false">'
+      + '        <span class="eye-show">' + ICON_EYE + '</span><span class="eye-hide">' + ICON_EYE_OFF + '</span></button></span>'
+      + '      <button type="submit" class="chip">turn on</button>'
+      + '      <button type="button" class="chip" data-lan-auth-cancel>cancel</button></div>'
+      + '  </form>'
+      + '  <p class="lan-auth-status" data-lan-auth-status role="status" aria-live="polite" aria-atomic="true"></p>'
+      + (canChangePassword
+        ? '  <form id="passwordChangeForm" class="password-change-form" data-password-change-form hidden>'
+          + '    <span class="hint">New password: 12 to 64 letters or numbers.</span>'
+          + '    <label>Current password<input type="password" data-password-current autocomplete="current-password" minlength="1" maxlength="64" required></label>'
+          + '    <label>New password<input type="password" data-password-new autocomplete="new-password" minlength="12" maxlength="64" pattern="[A-Za-z0-9]+" required></label>'
+          + '    <label>Confirm new password<input type="password" data-password-confirm autocomplete="new-password" minlength="12" maxlength="64" pattern="[A-Za-z0-9]+" required></label>'
+          + '    <div><button type="submit" class="chip">change password</button>'
+          + '      <button type="button" class="chip" data-password-change-cancel>cancel</button></div>'
+          + '  </form>'
+          + '  <p class="lan-auth-status" data-password-change-status role="status" aria-live="polite" aria-atomic="true"></p>'
+        : '')
+      + '</div>';
+  }
+
+  function birdweatherRow(state) {
+    state = state || {};
+    var available = state.ok !== false;
+    var enabled = available && !!state.enabled;
+    var configured = available && !!state.token_configured;
+    var privacy = parseInt(state.privacy_threshold, 10);
+    if (!isFinite(privacy) || privacy < 0 || privacy > 3) privacy = 0;
+    if (!configured && privacy === 0) privacy = 1;
+    var privacyButtons = [0, 1, 2, 3].map(function (level) {
+      return '<button type="button" data-v="' + level + '" aria-current="'
+        + (level === privacy ? 'true' : 'false') + '">' + level + '</button>';
+    }).join('');
+    var sharingDetails = 'BirdWeather receives each bird name, confidence, time, and your station coordinates. '
+      + 'Audio is separate and stays off for a new station unless you turn it on.';
+    var audioDetails = 'This sends the complete recording BirdNET analyzed, not only the detected call. '
+      + 'It may contain people or other nearby sounds.';
+    var privacyDetails = 'BirdNET still analyzes the audio. Level 0 checks the top 10 model candidates for Human, 1 about 60, 2 about 120, and 3 about 180. '
+      + 'A match suppresses local bird detections for that 3-second window and its neighbors. Full recordings are not redacted.';
+    return ''
+      + '<div class="birdweather-control" data-birdweather-control data-token-configured="' + (configured ? 'true' : 'false') + '">'
+      + '  <div class="menu-row birdweather-head">'
+      + '    <div class="access-copy"><span class="label">Share detections with BirdWeather</span>'
+      + settingsInfoMarkup('birdweatherTip', 'About BirdWeather sharing', sharingDetails)
+      + '    </div>'
+      + '    <div class="birdweather-head-actions">'
+      + '      <button type="button" class="settings-disclosure" data-birdweather-disclosure aria-controls="birdweatherDetails" aria-expanded="' + (enabled ? 'true' : 'false') + '"' + (available ? '' : ' disabled') + '>details</button>'
+      + '      <button type="button" class="switch" role="switch" data-birdweather-toggle'
+      + '        aria-label="Share detections with BirdWeather" aria-describedby="birdweatherTip"'
+      + '        aria-checked="' + (enabled ? 'true' : 'false') + '"' + (available ? '' : ' disabled') + '></button>'
+      + '    </div>'
+      + '  </div>'
+      + (available ? '' : '  <p class="birdweather-unavailable" role="status">BirdWeather controls are unavailable on this station.</p>')
+      + '  <div id="birdweatherDetails" class="birdweather-details-shell" data-birdweather-details-shell data-open="' + (enabled ? 'true' : 'false') + '" data-settled="' + (enabled ? 'true' : 'false') + '" aria-hidden="' + (enabled ? 'false' : 'true') + '"' + (enabled ? '' : ' hidden inert') + '>'
+      + '  <form class="birdweather-details" data-birdweather-details>'
+      + '    <div class="birdweather-token">'
+      + '      <div class="birdweather-token-editor" data-birdweather-token-editor' + (configured ? ' hidden' : '') + '>'
+      + '        <a id="birdweatherTokenLabel" href="https://app.birdweather.com/account/stations" target="_blank" rel="noopener">Station token</a>'
+      + '        <input type="text" data-birdweather-token aria-labelledby="birdweatherTokenLabel" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="161" placeholder="station token">'
+      + '      </div>'
+      + '      <div class="birdweather-token-actions" data-birdweather-token-actions' + (configured ? '' : ' hidden') + '>'
+      + '        <a class="birdweather-station-link" data-birdweather-station href="https://app.birdweather.com/account/stations" target="_blank" rel="noopener">view station on BirdWeather</a>'
+      + '        <button type="button" class="birdweather-forget" data-birdweather-forget>forget token</button>'
+      + '      </div>'
+      + '    </div>'
+      + '    <div class="menu-row">'
+      + '      <div class="access-copy"><span class="label">Upload analyzed recordings</span>'
+      + settingsInfoMarkup('birdweatherAudioTip', 'About BirdWeather audio uploads', audioDetails)
+      + '      </div>'
+      + '      <button type="button" class="switch" role="switch" data-birdweather-audio'
+      + '        aria-label="Upload analyzed recordings" aria-describedby="birdweatherAudioTip"'
+      + '        aria-checked="' + (state.upload_audio ? 'true' : 'false') + '"></button>'
+      + '    </div>'
+      + '    <div class="menu-row">'
+      + '      <div class="access-copy"><span class="label">Human-sound filter</span>'
+      + settingsInfoMarkup('birdweatherPrivacyTip', 'About the local human-sound filter', privacyDetails)
+      + '      </div>'
+      + '      <div class="seg birdweather-privacy" data-birdweather-privacy><i class="seg-pill" aria-hidden="true"></i>' + privacyButtons + '</div>'
+      + '    </div>'
+      + '    <p class="birdweather-status sr-only" data-birdweather-status role="status" aria-live="polite" aria-atomic="true"></p>'
+      + '  </form>'
+      + '  </div>'
+      + '</div>';
+  }
+
+  function wireBirdweatherControl(scope, initialState) {
+    var control = scope.querySelector('[data-birdweather-control]');
+    if (!control || !initialState || initialState.ok === false) return;
+    var state = initialState;
+    var mainSwitch = control.querySelector('[data-birdweather-toggle]');
+    var disclosure = control.querySelector('[data-birdweather-disclosure]');
+    var detailsShell = control.querySelector('[data-birdweather-details-shell]');
+    var details = control.querySelector('[data-birdweather-details]');
+    var tokenEditor = control.querySelector('[data-birdweather-token-editor]');
+    var tokenActions = control.querySelector('[data-birdweather-token-actions]');
+    var tokenInput = control.querySelector('[data-birdweather-token]');
+    var audioSwitch = control.querySelector('[data-birdweather-audio]');
+    var privacy = control.querySelector('[data-birdweather-privacy]');
+    var stationLink = control.querySelector('[data-birdweather-station]');
+    var status = control.querySelector('[data-birdweather-status]');
+    var forget = control.querySelector('[data-birdweather-forget]');
+    var probeSequence = 0;
+    var draftEnable = false;
+    var detailsTransitionTimer = 0;
+    var writeTimer = 0;
+    var writing = false;
+    var forgetting = false;
+    var writeQueue = {};
+    var tokenEditRevision = 0;
+    var tokenSubmissionRevision = -1;
+    var tokenFocusRevision = -1;
+    if (!state.token_configured && +state.privacy_threshold === 0) state.privacy_threshold = 1;
+
+    function note(message, error, tokenError) {
+      status.textContent = message || '';
+      status.classList.toggle('err', !!error);
+      tokenInput.setAttribute('aria-invalid', tokenError ? 'true' : 'false');
+      if (tokenInput.setCustomValidity) tokenInput.setCustomValidity(tokenError ? (message || 'BirdWeather rejected that token') : '');
+      if (tokenError && !tokenEditor.hidden && !tokenInput.disabled && tokenInput.reportValidity) tokenInput.reportValidity();
+    }
+    function owns(object, key) {
+      return Object.prototype.hasOwnProperty.call(object, key);
+    }
+    function selectPrivacy(value) {
+      privacy.querySelectorAll('button').forEach(function (button) {
+        button.setAttribute('aria-current', +button.dataset.v === +value ? 'true' : 'false');
+      });
+      syncPill(privacy);
+    }
+    function setWriting(next) {
+      writing = next;
+      control.setAttribute('aria-busy', next ? 'true' : 'false');
+      tokenInput.readOnly = next;
+      mainSwitch.setAttribute('aria-disabled', next ? 'true' : 'false');
+      audioSwitch.setAttribute('aria-disabled', next ? 'true' : 'false');
+      privacy.querySelectorAll('button').forEach(function (button) {
+        button.setAttribute('aria-disabled', next ? 'true' : 'false');
+      });
+      if (forget) forget.disabled = next || forgetting;
+    }
+    function tokenInputHasFocus() {
+      return typeof document !== 'undefined' && document.activeElement === tokenInput;
+    }
+    function showTokenState(remote) {
+      var configured = !!state.token_configured;
+      stationLink.removeAttribute('aria-busy');
+      tokenEditor.hidden = configured;
+      tokenActions.hidden = !configured;
+      forget.hidden = !configured;
+      if (!configured) {
+        stationLink.href = 'https://app.birdweather.com/account/stations';
+        stationLink.removeAttribute('data-station-id');
+        return;
+      }
+      tokenInput.value = '';
+      remote = remote || state.station;
+      var stationId = remote && remote.state === 'connected' ? +remote.station_id : 0;
+      if (Number.isInteger(stationId) && stationId > 0) {
+        stationLink.href = 'https://app.birdweather.com/stations/' + stationId;
+        stationLink.setAttribute('data-station-id', String(stationId));
+      } else {
+        stationLink.href = 'https://app.birdweather.com/account/stations';
+        stationLink.removeAttribute('data-station-id');
+      }
+    }
+    function detailsAreOpen() {
+      return detailsShell.getAttribute('data-open') === 'true';
+    }
+    function syncPrivacyPill() {
+      requestAnimationFrame(function () {
+        syncPill(privacy);
+        requestAnimationFrame(function () { syncPill(privacy); });
+      });
+    }
+    function finishDetailsOpen() {
+      if (!detailsAreOpen()) return;
+      detailsShell.setAttribute('data-settled', 'true');
+      syncPrivacyPill();
+    }
+    function finishDetailsClose() {
+      if (detailsAreOpen()) return;
+      detailsShell.hidden = true;
+      detailsShell.setAttribute('data-settled', 'false');
+    }
+    function openDetails(open, checkStation) {
+      clearTimeout(detailsTransitionTimer);
+      detailsShell.setAttribute('data-settled', 'false');
+      if (open) {
+        detailsShell.hidden = false;
+        detailsShell.inert = false;
+        detailsShell.setAttribute('aria-hidden', 'false');
+        void detailsShell.offsetHeight;
+        detailsShell.setAttribute('data-open', 'true');
+        syncPrivacyPill();
+        detailsTransitionTimer = setTimeout(finishDetailsOpen, 230);
+      } else {
+        detailsShell.setAttribute('data-open', 'false');
+        detailsShell.setAttribute('aria-hidden', 'true');
+        detailsShell.inert = true;
+        detailsTransitionTimer = setTimeout(finishDetailsClose, 180);
+      }
+      disclosure.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open && checkStation) probeStation();
+    }
+    detailsShell.addEventListener('transitionend', function (event) {
+      if (event.target === detailsShell && event.propertyName === 'grid-template-rows') {
+        clearTimeout(detailsTransitionTimer);
+        if (detailsAreOpen()) finishDetailsOpen();
+        else finishDetailsClose();
+      }
+    });
+    function applyState(next) {
+      probeSequence += 1;
+      var priorStation = state && state.token_configured && state.station;
+      var priorConfigured = !!(state && state.token_configured);
+      state = next || state;
+      if (!state.station && priorConfigured && state.token_configured && priorStation) state.station = priorStation;
+      if (!owns(writeQueue, 'enabled')) {
+        mainSwitch.setAttribute('aria-checked', state.enabled ? 'true' : 'false');
+      }
+      if (!owns(writeQueue, 'upload_audio')) {
+        audioSwitch.setAttribute('aria-checked', state.upload_audio ? 'true' : 'false');
+      }
+      if (!owns(writeQueue, 'privacy_threshold')) selectPrivacy(state.privacy_threshold);
+      control.setAttribute('data-token-configured', state.token_configured ? 'true' : 'false');
+      showTokenState(state.station);
+      if (state.enabled) draftEnable = false;
+    }
+    function probeStation() {
+      if (!state.token_configured) { showTokenState(null); return; }
+      var mine = ++probeSequence;
+      stationLink.setAttribute('aria-busy', 'true');
+      adminFetch('./avian/api/birdweather.php?probe=1', {
+        credentials: 'same-origin', cache: 'no-store',
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.ok) throw new Error(body.error || 'station lookup failed');
+          return body;
+        });
+      }).then(function (body) {
+        if (mine !== probeSequence) return;
+        state.station = body.station;
+        state.configuration_valid = body.configuration_valid;
+        stationLink.removeAttribute('aria-busy');
+        showTokenState(body.station);
+      }).catch(function (error) {
+        if (mine !== probeSequence || adminAuthCancelled(error)) return;
+        stationLink.removeAttribute('aria-busy');
+        showTokenState({ state: 'unavailable' });
+      });
+    }
+    function queueWrite(patch, delay) {
+      Object.keys(patch).forEach(function (key) { writeQueue[key] = patch[key]; });
+      note('', false, false);
+      clearTimeout(writeTimer);
+      writeTimer = setTimeout(flushWrites, typeof delay === 'number' ? delay : 0);
+    }
+    function readCanonicalState() {
+      return adminFetch('./avian/api/birdweather.php', {
+        credentials: 'same-origin', cache: 'no-store',
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.ok) throw new Error(body.error || 'BirdWeather state could not be re-read');
+          return body;
+        });
+      }).then(function (body) {
+        applyState(body);
+        return body;
+      });
+    }
+    function flushWrites() {
+      clearTimeout(writeTimer);
+      writeTimer = 0;
+      if (writing || !Object.keys(writeQueue).length) return;
+      var payload = writeQueue;
+      writeQueue = {};
+      var requestBody = JSON.stringify(payload);
+      var submittedToken = owns(payload, 'token') ? payload.token : null;
+      var submittedFocusRevision = tokenFocusRevision;
+      var focusSubmittedToken = submittedToken !== null
+        && submittedFocusRevision === tokenSubmissionRevision;
+      var focusAfterWrite = null;
+      var messageAfterWrite = '';
+      var tokenErrorAfterWrite = false;
+      if (submittedToken !== null || owns(payload, 'forget_token')) probeSequence += 1;
+      if (submittedToken !== null) payload.token = '';
+      setWriting(true);
+      return adminFetch('./avian/api/birdweather.php', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+        body: requestBody,
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.ok) {
+            var error = new Error(body.error || 'BirdWeather setting failed');
+            error.saved = !!body.saved;
+            error.settings = body.settings || null;
+            throw error;
+          }
+          return body;
+        });
+      }).then(function (body) {
+        requestBody = '';
+        var focusStationAfterApply = focusSubmittedToken && tokenInputHasFocus();
+        applyState(body);
+        if (submittedToken !== null || owns(payload, 'forget_token')) tokenInput.value = '';
+        if (body.station) showTokenState(body.station);
+        else if (submittedToken !== null && body.token_configured) probeStation();
+        if (owns(payload, 'forget_token')) {
+          openDetails(true, false);
+          focusAfterWrite = tokenInput;
+        } else if (submittedToken !== null && body.token_configured && focusStationAfterApply) {
+          focusAfterWrite = stationLink;
+        } else if (owns(payload, 'enabled') && !!body.enabled === !!payload.enabled) {
+          if (body.enabled) {
+            if (!body.station) probeStation();
+          } else {
+            openDetails(false, false);
+          }
+        }
+        tokenSubmissionRevision = -1;
+        return true;
+      }).catch(function (error) {
+        requestBody = '';
+        if (adminAuthCancelled(error)) return false;
+        var focusStationAfterApply = focusSubmittedToken && tokenInputHasFocus();
+        var recovery = Promise.resolve();
+        if (error.saved && error.settings) {
+          applyState(error.settings);
+        } else if (error.saved) {
+          recovery = readCanonicalState().catch(function () {
+            // The write is durable even when the canonical re-read fails. Do
+            // not leave a saved credential visible or make Forget look undone.
+            var fallback = Object.assign({}, state);
+            ['enabled', 'upload_audio', 'privacy_threshold'].forEach(function (key) {
+              if (owns(payload, key)) fallback[key] = payload[key];
+            });
+            if (submittedToken !== null) {
+              fallback.token_configured = true;
+              fallback.configuration_valid = true;
+              fallback.station = null;
+            } else if (owns(payload, 'forget_token')) {
+              fallback.enabled = false;
+              fallback.upload_audio = false;
+              fallback.token_configured = false;
+              fallback.configuration_valid = true;
+              fallback.station = null;
+            }
+            applyState(fallback);
+          });
+        } else {
+          applyState(state);
+        }
+        return recovery.then(function () {
+          if (error.saved && (submittedToken !== null || owns(payload, 'forget_token'))) tokenInput.value = '';
+          if (error.saved && submittedToken !== null && state.token_configured && focusStationAfterApply) {
+            focusAfterWrite = stationLink;
+          }
+          if (error.saved && owns(payload, 'forget_token') && !state.token_configured) {
+            openDetails(true, false);
+            focusAfterWrite = tokenInput;
+          }
+          messageAfterWrite = error.message || 'BirdWeather setting failed';
+          tokenErrorAfterWrite = submittedToken !== null && !error.saved;
+          tokenSubmissionRevision = -1;
+          return false;
+        });
+      }).then(function (ok) {
+        submittedToken = null;
+        forgetting = false;
+        setWriting(false);
+        note(messageAfterWrite, !!messageAfterWrite, tokenErrorAfterWrite);
+        if (focusAfterWrite && focusAfterWrite.focus) focusAfterWrite.focus();
+        if (tokenFocusRevision === submittedFocusRevision) tokenFocusRevision = -1;
+        if (Object.keys(writeQueue).length) queueWrite({}, 0);
+        return ok;
+      });
+    }
+    function saveToken(focusOnSuccess) {
+      // Match the API normalization boundary: ordinary surrounding spaces are
+      // paste noise, while tabs and other control characters must reach the
+      // server unchanged so its strict validator can reject them.
+      var value = tokenInput.value.replace(/^ +| +$/g, '');
+      if (!value) {
+        tokenInput.focus();
+        return;
+      }
+      if (tokenSubmissionRevision === tokenEditRevision
+        && (writing || owns(writeQueue, 'token'))) return;
+      tokenSubmissionRevision = tokenEditRevision;
+      tokenFocusRevision = focusOnSuccess ? tokenEditRevision : -1;
+      var patch = { token: value };
+      if (!state.token_configured) {
+        var selected = privacy.querySelector('button[aria-current="true"]');
+        patch.upload_audio = audioSwitch.getAttribute('aria-checked') === 'true';
+        patch.privacy_threshold = selected ? +selected.dataset.v : 1;
+      }
+      if (draftEnable) patch.enabled = true;
+      queueWrite(patch, 0);
+    }
+
+    disclosure.addEventListener('click', function () {
+      var open = !detailsAreOpen();
+      openDetails(open, open);
+    });
+    mainSwitch.addEventListener('click', function () {
+      if (writing || forgetting) return;
+      var prior = mainSwitch.getAttribute('aria-checked') === 'true';
+      var desired = !prior;
+      if (desired) {
+        draftEnable = true;
+        openDetails(true, false);
+        if (!state.token_configured || state.configuration_valid === false) {
+          if (state.token_configured) forget.focus();
+          else tokenInput.focus();
+          return;
+        }
+      } else {
+        draftEnable = false;
+      }
+      queueWrite({ enabled: desired }, 0);
+    });
+    audioSwitch.addEventListener('click', function () {
+      if (writing || forgetting) return;
+      var enabled = audioSwitch.getAttribute('aria-checked') !== 'true';
+      audioSwitch.setAttribute('aria-checked', enabled ? 'true' : 'false');
+      queueWrite({ upload_audio: enabled }, 0);
+    });
+    privacy.querySelectorAll('button').forEach(function (button) {
+      button.addEventListener('click', function () {
+        if (writing || forgetting) return;
+        privacy.querySelectorAll('button').forEach(function (candidate) {
+          candidate.setAttribute('aria-current', candidate === button ? 'true' : 'false');
+        });
+        syncPill(privacy);
+        queueWrite({ privacy_threshold: +button.dataset.v }, 0);
+      });
+    });
+    details.addEventListener('submit', function (event) {
+      event.preventDefault();
+      saveToken(true);
+    });
+    tokenInput.addEventListener('input', function () {
+      tokenEditRevision += 1;
+      note('', false);
+    });
+    tokenInput.addEventListener('change', function () { saveToken(false); });
+    tokenInput.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      saveToken(true);
+    });
+    forget.addEventListener('click', function () {
+      if (writing || forgetting) return;
+      if (!confirm('Forget the saved BirdWeather station token? Sharing must stay off until a new token is added.')) return;
+      forgetting = true;
+      forget.disabled = true;
+      probeSequence += 1;
+      state.station = null;
+      delete writeQueue.token;
+      queueWrite({
+        enabled: false,
+        upload_audio: false,
+        forget_token: true,
+      }, 0);
+    });
+    applyState(state);
+    if (state.enabled) probeStation();
+  }
+
+  function wireLanAuthControl(scope, security) {
+    var control = scope.querySelector('[data-lan-auth-control]');
+    if (!control) return;
+    var sw = control.querySelector('[data-lan-auth]');
+    var form = control.querySelector('[data-lan-auth-confirm]');
+    var password = control.querySelector('#lanAuthPassword');
+    var passwordVisibility = control.querySelector('[data-lan-password-visibility]');
+    var status = control.querySelector('[data-lan-auth-status]');
+    var cancel = control.querySelector('[data-lan-auth-cancel]');
+    var reconcile = control.querySelector('[data-lan-auth-reconcile]');
+    var submit = form.querySelector('[type="submit"]');
+    var desired = true;
+
+    function showPassword(show) {
+      password.type = show ? 'text' : 'password';
+      if (!passwordVisibility) return;
+      passwordVisibility.setAttribute('aria-pressed', show ? 'true' : 'false');
+      passwordVisibility.setAttribute('aria-label', show ? 'Hide admin password' : 'Show admin password');
+    }
+
+    function note(message, error) {
+      status.textContent = message || '';
+      status.classList.toggle('err', !!error);
+    }
+    function closePasswordChange() {
+      var passwordForm = control.querySelector('[data-password-change-form]');
+      var passwordOpen = control.querySelector('[data-password-change-open]');
+      if (!passwordForm || !passwordOpen) return;
+      passwordForm.querySelectorAll('input[type="password"]').forEach(function (input) { input.value = ''; });
+      passwordForm.hidden = true;
+      passwordOpen.hidden = false;
+      passwordOpen.setAttribute('aria-expanded', 'false');
+      var passwordStatus = control.querySelector('[data-password-change-status]');
+      if (passwordStatus) { passwordStatus.textContent = ''; passwordStatus.classList.remove('err'); }
+    }
+    function save(enabled, authorization) {
+      if (enabled && stopLiveAudioNow) stopLiveAudioNow();
+      sw.disabled = true;
+      note('saving...', false);
+      var headers = { 'Content-Type': 'application/json', 'X-Avian-Action': '1' };
+      if (authorization) {
+        headers.Authorization = authorization;
+        headers['X-Avian-Credential'] = '1';
+      }
+      return fetch('./avian/api/config.php', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: headers,
+        body: JSON.stringify({ lan_admin_auth: enabled }),
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.ok) {
+            var error = new Error(body.error || 'access setting failed');
+            error.status = response.status;
+            error.recovery = !!body.recovery;
+            error.reauth = !!body.reauth;
+            error.remediation = body.remediation || '';
+            throw error;
+          }
+          return body;
+        });
+      }).then(function () {
+        sessionReplaced();
+      }).catch(function (error) {
+        if (error.recovery) {
+          showAdminLocked('', true);
+          return;
+        }
+        if (error.reauth) {
+          sessionReplaced([error.message, error.remediation].filter(Boolean).join(' '));
+          return;
+        }
+        sw.disabled = false;
+        note([
+          error.status === 401 ? 'Wrong password.' : (error.message || 'access setting failed'),
+          error.remediation,
+        ].filter(Boolean).join(' '), true);
+        form.hidden = false;
+        password.focus();
+        if (error.status >= 500) tryAutoUnlock();
+      });
+    }
+
+    sw.addEventListener('click', function () {
+      closePasswordChange();
+      closeDd();
+      showPassword(false);
+      var on = sw.getAttribute('aria-checked') === 'true';
+      if (on) {
+        if (!confirm('Turn off local admin password? Anyone on this network will be able to open Settings, System, Logs, and Tools.')) return;
+        desired = false;
+        submit.textContent = 'turn off';
+        form.hidden = false;
+        note('', false);
+        password.focus();
+      } else {
+        desired = true;
+        submit.textContent = 'turn on';
+        form.hidden = false;
+        note('', false);
+        password.focus();
+      }
+    });
+    if (reconcile) reconcile.addEventListener('click', function () {
+      closePasswordChange();
+      closeDd();
+      showPassword(false);
+      desired = sw.getAttribute('aria-checked') === 'true';
+      submit.textContent = 'reapply';
+      form.hidden = false;
+      note('Confirm your password to reapply the saved setting.', false);
+      password.focus();
+    });
+    cancel.addEventListener('click', function () {
+      password.value = '';
+      showPassword(false);
+      form.hidden = true;
+      note('', false);
+      sw.focus();
+    });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var value = password.value;
+      var authorization = adminBasicAuthorization(value);
+      if (!authorization) {
+        note('Password must use 1 to 64 UTF-8 bytes without control characters.', true);
+        password.focus();
+        return;
+      }
+      password.value = '';
+      showPassword(false);
+      value = '';
+      save(desired, authorization);
+      authorization = '';
+    });
+    if (passwordVisibility) passwordVisibility.addEventListener('click', function () {
+      showPassword(password.type === 'password');
+      password.focus();
+    });
+  }
+
+  function wirePasswordChange(scope) {
+    var control = scope.querySelector('[data-password-change]');
+    if (!control) return;
+    var open = control.querySelector('[data-password-change-open]');
+    var form = control.querySelector('[data-password-change-form]');
+    var current = control.querySelector('[data-password-current]');
+    var next = control.querySelector('[data-password-new]');
+    var confirmNext = control.querySelector('[data-password-confirm]');
+    var cancel = control.querySelector('[data-password-change-cancel]');
+    var status = control.querySelector('[data-password-change-status]');
+    function note(message, error) {
+      status.textContent = message || '';
+      status.classList.toggle('err', !!error);
+    }
+    function clear() {
+      current.value = '';
+      next.value = '';
+      confirmNext.value = '';
+    }
+    open.addEventListener('click', function () {
+      var lanForm = control.querySelector('[data-lan-auth-confirm]');
+      var lanPassword = control.querySelector('#lanAuthPassword');
+      if (lanPassword) { lanPassword.value = ''; lanPassword.type = 'password'; }
+      var lanVisibility = control.querySelector('[data-lan-password-visibility]');
+      if (lanVisibility) {
+        lanVisibility.setAttribute('aria-pressed', 'false');
+        lanVisibility.setAttribute('aria-label', 'Show admin password');
+      }
+      if (lanForm) lanForm.hidden = true;
+      var lanStatus = control.querySelector('[data-lan-auth-status]');
+      if (lanStatus) { lanStatus.textContent = ''; lanStatus.classList.remove('err'); }
+      closeDd();
+      form.hidden = false;
+      open.hidden = true;
+      open.setAttribute('aria-expanded', 'true');
+      note('', false);
+      current.focus();
+    });
+    cancel.addEventListener('click', function () {
+      clear();
+      form.hidden = true;
+      open.hidden = false;
+      open.setAttribute('aria-expanded', 'false');
+      note('', false);
+      open.focus();
+    });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var currentValue = current.value;
+      var nextValue = next.value;
+      var authorization = adminBasicAuthorization(currentValue);
+      if (!authorization) {
+        note('Current password must use 1 to 64 UTF-8 bytes without control characters.', true);
+        current.focus();
+        return;
+      }
+      if (!/^[A-Za-z0-9]{12,64}$/.test(nextValue)) {
+        note('New password must use 12 to 64 letters or numbers.', true);
+        next.focus();
+        return;
+      }
+      if (nextValue !== confirmNext.value) {
+        note('New passwords do not match.', true);
+        confirmNext.focus();
+        return;
+      }
+      var requestBody = JSON.stringify({ admin_password: nextValue });
+      clear();
+      currentValue = '';
+      nextValue = '';
+      note('changing password...', false);
+      Array.prototype.forEach.call(form.elements, function (element) { element.disabled = true; });
+      fetch('./avian/api/config.php', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Avian-Action': '1',
+          'X-Avian-Credential': '1',
+          'Authorization': authorization,
+        },
+        body: requestBody,
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (!response.ok || !body.ok) {
+            var error = new Error(body.error || 'password change failed');
+            error.status = response.status;
+            error.recovery = !!body.recovery;
+            error.reauth = !!body.reauth;
+            error.remediation = body.remediation || '';
+            throw error;
+          }
+          return body;
+        });
+      }).then(function () {
+        sessionReplaced();
+      }).catch(function (error) {
+        if (error.recovery) {
+          showAdminLocked('', true);
+          return;
+        }
+        if (error.reauth) {
+          sessionReplaced([error.message, error.remediation].filter(Boolean).join(' '));
+          return;
+        }
+        Array.prototype.forEach.call(form.elements, function (element) { element.disabled = false; });
+        note([
+          error.status === 401 ? 'Current password is incorrect.' : (error.message || 'password change failed'),
+          error.remediation,
+        ].filter(Boolean).join(' '), true);
+        current.focus();
+        if (error.status >= 500) tryAutoUnlock();
+      }).then(function () {
+        Array.prototype.forEach.call(form.elements, function (element) { element.disabled = false; });
+        requestBody = '';
+        authorization = '';
+      });
+    });
+  }
+  function wireSettingsAccessDismissal(scope) {
+    if (settingsAccessCleanup) settingsAccessCleanup();
+    var control = scope.querySelector('[data-lan-auth-control]');
+    if (!control) return;
+    var lanForm = control.querySelector('[data-lan-auth-confirm]');
+    var lanSwitch = control.querySelector('[data-lan-auth]');
+    var passwordForm = control.querySelector('[data-password-change-form]');
+    var passwordOpen = control.querySelector('[data-password-change-open]');
+    function closeLan(returnFocus) {
+      if (!lanForm || lanForm.hidden) return false;
+      var input = lanForm.querySelector('#lanAuthPassword');
+      if (input) { input.value = ''; input.type = 'password'; }
+      var visibility = lanForm.querySelector('[data-lan-password-visibility]');
+      if (visibility) {
+        visibility.setAttribute('aria-pressed', 'false');
+        visibility.setAttribute('aria-label', 'Show admin password');
+      }
+      lanForm.hidden = true;
+      var status = control.querySelector('[data-lan-auth-status]');
+      if (status) { status.textContent = ''; status.classList.remove('err'); }
+      if (returnFocus && lanSwitch) lanSwitch.focus();
+      return true;
+    }
+    function closePassword(returnFocus) {
+      if (!passwordForm || passwordForm.hidden) return false;
+      passwordForm.querySelectorAll('input[type="password"]').forEach(function (input) { input.value = ''; });
+      passwordForm.hidden = true;
+      if (passwordOpen) {
+        passwordOpen.hidden = false;
+        passwordOpen.setAttribute('aria-expanded', 'false');
+        if (returnFocus) passwordOpen.focus();
+      }
+      var status = control.querySelector('[data-password-change-status]');
+      if (status) { status.textContent = ''; status.classList.remove('err'); }
+      return true;
+    }
+    function outside(event) {
+      if (!event.target || typeof event.target.closest !== 'function') return;
+      if (lanForm && !lanForm.hidden && !lanForm.contains(event.target)
+        && event.target !== lanSwitch && !event.target.closest('[data-lan-auth-reconcile]')) closeLan(false);
+      if (passwordForm && !passwordForm.hidden && !passwordForm.contains(event.target)
+        && event.target !== passwordOpen) closePassword(false);
+    }
+    function escape(event) {
+      if (event.key !== 'Escape') return;
+      var closed = closePassword(true) || closeLan(true);
+      if (closed) { event.preventDefault(); event.stopPropagation(); }
+    }
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', escape, true);
+    settingsAccessCleanup = function () {
+      closePassword(false);
+      closeLan(false);
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', escape, true);
+      settingsAccessCleanup = null;
+    };
+  }
   function wireSettingsControls(scope) {
     scope = scope || document;
-    scope.querySelectorAll('.switch:not([data-atlas-always-all])').forEach(function (sw) {
+    scope.querySelectorAll('.switch:not([data-labels-switch]):not([data-atlas-always-all]):not([data-atlas-classic]):not([data-lan-auth]):not([data-birdweather-toggle]):not([data-birdweather-audio]):not([data-archive-toggle])').forEach(function (sw) {
       sw.addEventListener('click', function () {
         var on = sw.getAttribute('aria-checked') !== 'true';
         sw.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -6037,7 +8716,7 @@
       // the analyzer, and a drag fires input a hundred times.
       sl.addEventListener('change', function () { queueSave(300); });
     });
-    scope.querySelectorAll('.seg:not([data-theme-seg]):not([data-labels-seg])').forEach(function (seg) {
+    scope.querySelectorAll('.seg:not([data-theme-seg]):not([data-birdweather-privacy])').forEach(function (seg) {
       seg.querySelectorAll('button').forEach(function (b) {
         b.addEventListener('click', function () {
           seg.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-current', x === b ? 'true' : 'false'); });
@@ -6058,13 +8737,41 @@
         else { clearTimeout(autoSaveT); setSaveState(''); }
       });
     });
+    scope.querySelectorAll('input.settings-text').forEach(function (inp) {
+      function stage() {
+        pending[inp.dataset.key] = inp.value.trim();
+      }
+      inp.addEventListener('input', function () {
+        stage();
+        queueSave(800);
+      });
+      inp.addEventListener('change', function () {
+        stage();
+        saveSettings();
+      });
+      inp.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        stage();
+        saveSettings();
+        inp.blur();
+      });
+    });
   }
 
   function saveSettings() {
-    if (Object.keys(pending).length === 0) return;
-    var body = JSON.stringify(pending);
+    if (Object.keys(pending).length === 0) return Promise.resolve(true);
+    if (settingsSaveBusy) { queueSave(300); return Promise.resolve(false); }
+    if (autoSaveT) clearTimeout(autoSaveT);
+    autoSaveT = null;
+    var submitted = pending;
+    pending = {};
+    var resetAtMidnightChanged = Object.prototype.hasOwnProperty.call(submitted, 'RESET_AT_MIDNIGHT');
+    var body = JSON.stringify(submitted);
+    var saved = false;
+    settingsSaveBusy = true;
     setSaveState('saving...');
-    fetch('./avian/api/config.php', {
+    return adminFetch('./avian/api/config.php', {
       method: 'POST', body: body,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
@@ -6072,14 +8779,54 @@
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
         if (res.ok && res.j.ok) {
-          pending = {};
+          saved = true;
+          if (Object.prototype.hasOwnProperty.call(submitted, 'SITE_NAME')
+            && !Object.prototype.hasOwnProperty.call(pending, 'SITE_NAME')) {
+            applySiteName(submitted.SITE_NAME);
+          }
+          if (resetAtMidnightChanged
+            && !Object.prototype.hasOwnProperty.call(pending, 'RESET_AT_MIDNIGHT')) {
+            refreshAll();
+          }
           setSaveState('saved ✓', 'ok');
           setTimeout(function () { setSaveState(''); }, 1800);
         } else {
+          restoreSubmittedSettings(submitted);
           setSaveState('save failed', 'err');
         }
       })
-      .catch(function () { setSaveState('network error', 'err'); });
+      .catch(function (error) {
+        if (adminAuthCancelled(error)) return;
+        restoreSubmittedSettings(submitted);
+        setSaveState('network error', 'err');
+      })
+      .then(function () {
+        settingsSaveBusy = false;
+        submitted = {};
+        return saved;
+      });
+  }
+
+  function flushPendingSettings() {
+    return new Promise(function (resolve) {
+      function settle() {
+        if (settingsSaveBusy) {
+          setTimeout(settle, 25);
+          return;
+        }
+        if (!Object.keys(pending).length) {
+          resolve(true);
+          return;
+        }
+        saveSettings().then(function (ok) {
+          if (!ok) { resolve(false); return; }
+          settle();
+        });
+      }
+      if (autoSaveT) clearTimeout(autoSaveT);
+      autoSaveT = null;
+      settle();
+    });
   }
 
   // ---- Hash routing + atlas detail modal ----
@@ -6090,7 +8837,7 @@
   function readHash() {
     var m = location.hash.match(/^#sci=([^&]+)/);
     if (!m) return null;
-    return decodeURIComponent(m[1]);
+    try { return decodeURIComponent(m[1]); } catch (e) { return null; }
   }
   function highlightAtlas(sci) {
     var grid = document.getElementById('atlasGrid');
@@ -6101,7 +8848,9 @@
     if (!sci) return;
     var attempts = 0;
     (function find() {
-      var card = grid.querySelector('.bird-card[data-sci="' + sci.replace(/"/g, '\"') + '"]');
+      var card = [].slice.call(grid.querySelectorAll('.bird-card[data-sci]')).find(function (candidate) {
+        return candidate.dataset.sci === sci;
+      });
       if (!card) {
         if (attempts++ < 10) return setTimeout(find, 80);
         return;
@@ -6337,7 +9086,7 @@
     var com = sp ? (sp.com || '') : '';
     var base = './avian/api/cutout.php?sci=' + encodeURIComponent(sci) +
       (com ? '&com=' + encodeURIComponent(com) : '') +
-      '&v=' + SKETCH_VERSION;
+      '&v=' + artRevision(sci, SKETCH_VERSION);
     var n = +pose || 1;
     return n > 1 ? base + '&pose=' + n : base;
   }
@@ -6348,31 +9097,71 @@
   // collage masks refresh in place. Cost control is the whole point -
   // people generate the birds they actually hear, not a whole region.
   var genPollT = null;
+  var activeGenerate = null;
   function genBtnState(btn, label, disabled) {
     btn.textContent = label;
     btn.disabled = !!disabled;
+  }
+  function lockVisibleGenerateForAuth() {
+    if (genPollT) { clearTimeout(genPollT); genPollT = null; }
+    var btn = document.getElementById('modalGenerate');
+    if (!btn || btn.hidden) return;
+    var interrupted = activeGenerate && activeGenerate.btn === btn
+      && activeGenerate.stillThere();
+    genBtnState(btn, interrupted
+      ? 'unlock in menu to check progress'
+      : 'unlock in menu to generate', false);
+  }
+  function resumeVisibleGenerateAfterAuth() {
+    var btn = document.getElementById('modalGenerate');
+    if (!btn || btn.hidden) return;
+    if (activeGenerate && activeGenerate.btn === btn
+      && activeGenerate.stillThere()) {
+      genBtnState(btn, 'checking progress...', true);
+      watchGenerate(btn, activeGenerate.sci, activeGenerate.stillThere,
+        activeGenerate.onDone, activeGenerate);
+      return;
+    }
+    activeGenerate = null;
+    if (/^unlock in menu/.test(btn.textContent || '')) {
+      genBtnState(btn, 'generate image', false);
+    }
+  }
+  function finishActiveGenerate(job) {
+    if (activeGenerate === job) activeGenerate = null;
   }
   // stillThere tells the poller whether its button is still the one on
   // screen: the modal may have moved to another bird, and the atlas may have
   // re-rendered the card out from under us. Without it the poll repaints
   // someone else's button.
-  function watchGenerate(btn, sci, stillThere, onDone) {
+  function watchGenerate(btn, sci, stillThere, onDone, job) {
     clearTimeout(genPollT);
-    fetchJson('./avian/api/generate.php?action=status').then(function (s) {
-      if (!stillThere()) return;
+    adminJson('./avian/api/generate.php?action=status').then(function (s) {
+      if (activeGenerate !== job) return;
+      if (!stillThere()) { finishActiveGenerate(job); return; }
       if (s.running) {
         genBtnState(btn, s.step === 'masks' ? 'finishing...' : 'generating...', true);
-        genPollT = setTimeout(function () { watchGenerate(btn, sci, stillThere, onDone); }, 4000);
+        genPollT = setTimeout(function () {
+          watchGenerate(btn, sci, stillThere, onDone, job);
+        }, 4000);
         return;
       }
       if (s.ok && s.sci === sci) {
+        finishActiveGenerate(job);
         genBtnState(btn, 'generated', true);
         justGenerated[sci] = Date.now();
         onDone();
       } else {
+        finishActiveGenerate(job);
         genBtnState(btn, 'failed, try again', false);
       }
-    }).catch(function () {
+    }).catch(function (error) {
+      if (activeGenerate !== job) return;
+      if (adminAuthCancelled(error)) {
+        if (stillThere()) genBtnState(btn, 'unlock in menu to check progress', false);
+        return;
+      }
+      finishActiveGenerate(job);
       if (stillThere()) genBtnState(btn, 'failed, try again', false);
     });
   }
@@ -6386,22 +9175,43 @@
       delete POSTCARD_POSE_CACHE[sci];
       loadTables(true);
     };
+    if (adminAccessState !== 'unlocked') {
+      genBtnState(btn, 'unlock in menu to generate', false);
+      openDd();
+      focusEl(document.getElementById('lockPass'));
+      return;
+    }
+    var job = { btn: btn, sci: sci, stillThere: stillThere, onDone: onDone };
+    activeGenerate = job;
     genBtnState(btn, 'starting...', true);
-    fetch('./avian/api/generate.php?action=start', {
+    adminFetch('./avian/api/generate.php?action=start', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
       body: JSON.stringify({ sci: sci }),
     }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
-        if (!stillThere()) return;
+        if (activeGenerate !== job || !stillThere()) return;
         if (!res.ok) {
           var why = (res.j && res.j.error) || 'failed';
+          if (why === 'busy') {
+            watchGenerate(btn, sci, stillThere, onDone, job);
+            return;
+          }
+          finishActiveGenerate(job);
           genBtnState(btn, why === 'no gemini key' ? 'add a gemini key in settings' : why, false);
           return;
         }
-        watchGenerate(btn, sci, stillThere, onDone);
+        watchGenerate(btn, sci, stillThere, onDone, job);
       })
-      .catch(function () { if (stillThere()) genBtnState(btn, 'failed, try again', false); });
+      .catch(function (error) {
+        if (activeGenerate !== job) return;
+        if (adminAuthCancelled(error)) {
+          if (stillThere()) genBtnState(btn, 'unlock in menu to check progress', false);
+          return;
+        }
+        finishActiveGenerate(job);
+        if (stillThere()) genBtnState(btn, 'failed, try again', false);
+      });
   }
   (function wireGenerate() {
     var btn = document.getElementById('modalGenerate');
@@ -6462,6 +9272,7 @@
 
   var POSTCARD_IMAGE_REQUEST = 0;
   var POSTCARD_CONTENT_REQUEST = 0;
+  var activePostcardEducatorScope = '';
   var POSTCARD_POSE_CACHE = Object.create(null);
   var postcardPanelAnimations = [];
   var postcardPanelMotionId = 0;
@@ -6661,8 +9472,28 @@
     });
   }
 
-  function populatePostcard(sci) {
+  function populatePostcard(
+    sci,
+    renderedScopeId,
+    renderedScopeGeneration,
+    renderedScopeRevision,
+    renderedStateKey,
+    renderedStateRevision
+  ) {
     if (!sci) return;
+    if (renderedScopeId === undefined) renderedScopeId = educatorScopeId();
+    if (!validEducatorScopeKey(renderedScopeId)) renderedScopeId = '';
+    activePostcardEducatorScope = renderedScopeId;
+    renderedScopeGeneration = Number.isSafeInteger(+renderedScopeGeneration)
+      ? +renderedScopeGeneration : educatorScopeGeneration;
+    renderedScopeRevision = renderedScopeRevision === '' || renderedScopeRevision === null
+      || renderedScopeRevision === undefined ? null
+      : (Number.isFinite(+renderedScopeRevision) ? +renderedScopeRevision : null);
+    renderedStateKey = typeof renderedStateKey === 'string' && /^[a-f0-9]{24}$/.test(renderedStateKey)
+      ? renderedStateKey : '';
+    renderedStateRevision = renderedStateRevision === '' || renderedStateRevision === null
+      || renderedStateRevision === undefined ? null
+      : (Number.isFinite(+renderedStateRevision) ? +renderedStateRevision : null);
     var request = ++POSTCARD_IMAGE_REQUEST;
     var contentRequest = ++POSTCARD_CONTENT_REQUEST;
     var img = document.getElementById('modalImg');
@@ -6683,7 +9514,9 @@
     });
     if (genBtn) {
       genBtn.hidden = !needsArt;
-      if (needsArt) genBtnState(genBtn, 'generate image', false);
+      if (needsArt) genBtnState(genBtn,
+        adminAccessState === 'unlocked' ? 'generate image' : 'unlock in menu to generate',
+        false);
     }
 
     var imageReady;
@@ -6801,10 +9634,26 @@
     resetPostcardPanels();
 
     // Species detail (lifelist row + every detection).
-    var loadSpecies = SPECIES_CACHE[sci]
-      ? Promise.resolve(SPECIES_CACHE[sci])
-      : fetchJson('./avian/api/birdnet-api.php?action=species&sci=' + encodeURIComponent(sci)).then(function (j) {
-        SPECIES_CACHE[sci] = j;
+    var speciesScope = renderedScopeId;
+    var speciesCacheKey = (speciesScope || 'station') + '|' + sci;
+    // A postcard must be bound to the exact dataset that rendered its card,
+    // even when that dataset came from the server's automatic current capture.
+    var speciesRequest = {
+      scopeId: speciesScope,
+      generation: renderedScopeGeneration,
+      revision: renderedScopeRevision,
+      stateKey: renderedStateKey,
+      stateRevision: renderedStateRevision,
+    };
+    // Active captures and folders containing an open capture grow while the
+    // page is open. Scoped postcards therefore fetch fresh detections each
+    // time; only the immutable station-wide view uses the species cache.
+    var cacheSpecies = educatorSpeciesCacheAllowed(speciesScope);
+    var loadSpecies = cacheSpecies && SPECIES_CACHE[speciesCacheKey]
+      ? Promise.resolve(SPECIES_CACHE[speciesCacheKey])
+      : scopedFetchJson('species', { sci: sci }, speciesRequest).then(function (j) {
+        if (speciesRequest.generation !== educatorScopeGeneration) throw new Error('stale educator scope');
+        if (cacheSpecies) SPECIES_CACHE[speciesCacheKey] = j;
         return j;
       });
     loadSpecies.then(function (j) {
@@ -6821,7 +9670,9 @@
       document.getElementById('modalRecCount').textContent = dets.length + (dets.length === 1 ? ' recording' : ' recordings');
       document.getElementById('modalRecordings').innerHTML = dets.length
         ? dets.map(function (d) {
-          return '<li class="rec-row" data-file="' + escHtml(d.file || '') + '" data-date="' + escHtml(d.d || '') + '">'
+          return '<li class="rec-row" data-file="' + escHtml(d.file || '') + '" data-date="' + escHtml(d.d || '')
+            + '" data-detection="' + adminAttr(educatorDetectionId(d.detection_id) || '')
+            + '" data-edu="' + adminAttr(speciesScope) + '">'
             + '<button class="rec-row-toggle" type="button" aria-expanded="false">'
             + '<span class="when"><b>' + fmtRecTime(d.d, d.t) + '</b></span>'
             + '<span class="conf"><b>' + ((+d.conf || 0) * 100).toFixed(0) + '%</b></span>'
@@ -6879,7 +9730,9 @@
   function openDetailModal(sci, waitCount) {
     if (!sci) return;
     var card = atlasGridEl
-      ? atlasGridEl.querySelector('.bird-card[data-sci="' + sci.replace(/"/g, '\"') + '"]')
+      ? [].slice.call(atlasGridEl.querySelectorAll('.bird-card[data-sci]')).find(function (candidate) {
+        return candidate.dataset.sci === sci;
+      })
       : null;
     if (card && card.classList.contains('stamp-card')) return openPostcard(card, { preserveHash: true });
 
@@ -6897,6 +9750,7 @@
     populatePostcard(sci);
     var postcard = document.getElementById('postcard-modal');
     if (!postcard) return;
+    setPostcardAtlasSource(atlasUsesClassicCards() ? 'classic' : 'stamps');
     preparePostcardShell();
     revealPostcardShell();
   }
@@ -7177,7 +10031,7 @@
   window.__openDetailModal = openDetailModal;
   window.__closeDetailModal = closeDetailModal;
 
-  // ===== Admin overlay (settings / system / logs / tools) =====
+  // ===== Admin overlay (settings / system / logs / tools / educators) =====
   // Lives in the same shell as the rest of the app - the menu button
   // and return-to-atlas pill stay put. The slider hides; this overlay
   // takes over the body. Navigation is via the drawer menu, NOT
@@ -7187,15 +10041,1997 @@
   var adminTitle = document.getElementById('adminTitle');
   var adminPollT = null;
   var adminSect = null;
+  var adminTitleFrame = 0;
+  // Display Mode is only a quiet chrome preference. It never owns the
+  // browser window or starts a rendering loop.
+  var DISPLAY_MODE_KEY = 'bird:educatorDisplayMode:v1';
+  var DISPLAY_EDGE_PX = 96;
+  var DISPLAY_TOUCH_HIDE_MS = 2400;
+  var displayModeOn = false;
+  var displayPointerEdge = '';
+  var displayFocusEdge = '';
+  var displayPointerFocus = false;
+  var displayTouchEdge = '';
+  var displayTouchHideTimer = null;
+  var displayVisibleSignature = '';
+  var displayOverlayWasOpen = false;
+  function displayModeEnabled() { return displayModeOn; }
+  function displayStoredMode() { return readLS(DISPLAY_MODE_KEY, 'off') === 'on'; }
+  function displayControlEdgeForTarget(target) {
+    if (!target || !target.closest) return '';
+    if (target.closest('.top, .menu-shell, #returnToEducators')) return 'top';
+    if (target.closest('#slider')) return 'bottom';
+    return '';
+  }
+  function displayEdgeForY(clientY) {
+    var y = Number(clientY);
+    if (!Number.isFinite(y)) return '';
+    if (y <= DISPLAY_EDGE_PX) return 'top';
+    if (y >= window.innerHeight - DISPLAY_EDGE_PX) return 'bottom';
+    return '';
+  }
+  function displayOverlayOpen() {
+    var menu = document.getElementById('menu-dd');
+    var postcard = document.getElementById('postcard-modal');
+    var about = document.getElementById('about-modal');
+    return document.body.classList.contains('admin-on')
+      || (menu && menu.getAttribute('aria-hidden') === 'false')
+      || (postcard && postcard.getAttribute('aria-hidden') === 'false')
+      || (about && about.getAttribute('aria-hidden') === 'false');
+  }
+  function syncDisplayControlVisibility(force) {
+    var overlay = displayModeOn && displayOverlayOpen();
+    var top = displayModeOn && (overlay || displayPointerEdge === 'top'
+      || displayFocusEdge === 'top' || displayTouchEdge === 'top');
+    var bottom = displayModeOn && (overlay || displayPointerEdge === 'bottom'
+      || displayFocusEdge === 'bottom' || displayTouchEdge === 'bottom');
+    var signature = (top ? '1' : '0') + (bottom ? '1' : '0');
+    if (!force && signature === displayVisibleSignature) return false;
+    displayVisibleSignature = signature;
+    document.body.classList.toggle('display-top-visible', top);
+    document.body.classList.toggle('display-bottom-visible', bottom);
+    return true;
+  }
+  function syncDisplayOverlayVisibility() {
+    if (!displayModeOn) return;
+    var open = displayOverlayOpen();
+    if (open === displayOverlayWasOpen) return;
+    displayOverlayWasOpen = open;
+    syncDisplayControlVisibility();
+  }
+  function syncDisplayMode() {
+    document.body.classList.toggle('display-mode', displayModeOn);
+    document.querySelectorAll('[data-display-mode]').forEach(function (button) {
+      button.setAttribute('aria-checked', displayModeOn ? 'true' : 'false');
+      button.setAttribute('aria-disabled', 'false');
+      button.removeAttribute('aria-busy');
+      button.disabled = false;
+    });
+    if (displayModeOn) {
+      displayOverlayWasOpen = displayOverlayOpen();
+    } else {
+      displayOverlayWasOpen = false;
+      displayPointerEdge = '';
+      displayFocusEdge = '';
+      displayPointerFocus = false;
+      displayTouchEdge = '';
+      if (displayTouchHideTimer) {
+        clearTimeout(displayTouchHideTimer);
+        displayTouchHideTimer = null;
+      }
+    }
+    syncDisplayControlVisibility(true);
+  }
+  function setDisplayMode(enabled, options) {
+    options = options || {};
+    displayModeOn = !!enabled;
+    if (options.persist !== false) {
+      if (displayModeOn) writeLS(DISPLAY_MODE_KEY, 'on');
+      else removeLS(DISPLAY_MODE_KEY);
+    }
+    syncDisplayMode();
+    return displayModeOn;
+  }
+  function requestDisplayMode(enabled, options) {
+    return setDisplayMode(!!enabled, options);
+  }
+  function restoreDisplayModePreference() {
+    return setDisplayMode(displayStoredMode(), { persist: false });
+  }
+  function clearDisplayTouchEdge() {
+    if (displayTouchHideTimer) {
+      clearTimeout(displayTouchHideTimer);
+      displayTouchHideTimer = null;
+    }
+    if (!displayTouchEdge) return false;
+    displayTouchEdge = '';
+    syncDisplayControlVisibility();
+    return true;
+  }
+  function showDisplayTouchEdge(edge) {
+    if (!displayModeOn || (edge !== 'top' && edge !== 'bottom')) return false;
+    if (displayTouchHideTimer) clearTimeout(displayTouchHideTimer);
+    displayTouchEdge = edge;
+    syncDisplayControlVisibility();
+    displayTouchHideTimer = setTimeout(function () {
+      displayTouchHideTimer = null;
+      displayTouchEdge = '';
+      syncDisplayControlVisibility();
+    }, DISPLAY_TOUCH_HIDE_MS);
+    return true;
+  }
+  function handleDisplayPointerMove(event) {
+    if (!displayModeOn || (event.pointerType && event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
+    var edge = displayEdgeForY(event.clientY);
+    if (edge === displayPointerEdge) return;
+    displayPointerEdge = edge;
+    syncDisplayControlVisibility();
+  }
+  function handleDisplayPointerDown(event) {
+    if (!displayModeOn) return;
+    displayPointerFocus = true;
+    displayFocusEdge = '';
+    if (event.pointerType !== 'touch') {
+      syncDisplayControlVisibility();
+      return;
+    }
+    var edge = displayEdgeForY(event.clientY);
+    if (!edge) {
+      if (!clearDisplayTouchEdge()) syncDisplayControlVisibility();
+      return;
+    }
+    var alreadyVisible = document.body.classList.contains('display-' + edge + '-visible');
+    showDisplayTouchEdge(edge);
+    if (!alreadyVisible && (!event.target.closest || !event.target.closest('.top, .menu-shell, #returnToEducators, #slider'))) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+  function handleDisplayFocusIn(event) {
+    if (!displayModeOn) return;
+    displayFocusEdge = displayPointerFocus ? '' : displayControlEdgeForTarget(event.target);
+    displayPointerFocus = false;
+    syncDisplayControlVisibility();
+  }
+  function handleDisplayFocusOut(event) {
+    if (!displayModeOn) return;
+    displayFocusEdge = displayPointerFocus ? '' : displayControlEdgeForTarget(event.relatedTarget);
+    syncDisplayControlVisibility();
+  }
+  function handleDisplayKeyDown() { displayPointerFocus = false; }
+  function handleDisplayPointerEnd() { displayPointerFocus = false; }
+  setDisplayMode(false, { persist: false });
+  document.addEventListener('pointermove', handleDisplayPointerMove, { passive: true });
+  document.addEventListener('pointerdown', handleDisplayPointerDown, { passive: false });
+  document.addEventListener('pointerup', handleDisplayPointerEnd, { passive: true });
+  document.addEventListener('pointercancel', handleDisplayPointerEnd, { passive: true });
+  document.addEventListener('keydown', handleDisplayKeyDown);
+  document.addEventListener('focusin', handleDisplayFocusIn);
+  document.addEventListener('focusout', handleDisplayFocusOut);
+  var displayObserver = window.MutationObserver
+    ? new MutationObserver(syncDisplayOverlayVisibility) : null;
+  if (displayObserver) {
+    [adminEl, document.getElementById('menu-dd'),
+      document.getElementById('postcard-modal'), document.getElementById('about-modal')]
+      .filter(Boolean).forEach(function (element) {
+        displayObserver.observe(element, { attributes: true, attributeFilter: ['class', 'aria-hidden'] });
+      });
+  }
+
+  var educatorState = null;
+  var educatorStateRequest = 0;
+  var educatorEditing = null;
+  var educatorPendingState = null;
+  var educatorActionBusy = false;
+  var educatorElapsedTimer = null;
+  var educatorStatusMessage = '';
+  var educatorStatusError = false;
+  var educatorFocusSelector = '';
+  var educatorStartDraft = '';
+  var educatorFolderDraft = '';
+  var educatorFolderComposerOpen = false;
+  var educatorLiveWide = false;
+  var educatorLiveWideQuery = window.matchMedia ? window.matchMedia('(min-width: 901px)') : null;
+  var EDUCATOR_EXPANDED_KEY = 'bird:educatorFoldersExpanded:v2';
+  var educatorExpandedFolders = Object.create(null);
+  var educatorExpandedFoldersLoaded = false;
+  var educatorActionMenuState = null;
+  var educatorMoveState = null;
+  var educatorCaptureArchive = Object.create(null);
+  var educatorCaptureOrder = [];
+  var educatorCapturePage = { total: 0, more: false, next_cursor: null };
+  var educatorCaptureArchiveRevision = null;
+  var educatorOlderBusy = false;
+  var educatorAcceptedSignature = '';
+  var EDUCATOR_COUNT_BATCH_MAX = 8;
+  var EDUCATOR_COUNT_RETRY_MS = 60000;
+  var EDUCATOR_COUNT_CACHE_TTL_MS = 60000;
+  var EDUCATOR_COUNT_UNAVAILABLE_TTL_MS = 5 * 60000;
+  var educatorCountCache = Object.create(null);
+  var educatorCountAttempted = Object.create(null);
+  var educatorCountObserver = null;
+  var educatorCountRoot = null;
+  var educatorCountFallbackHandler = null;
+  var educatorCountFallbackTimer = null;
+  var educatorCountExpiryTimer = null;
+  var educatorCountQueue = Object.create(null);
+  var educatorCountRequest = null;
+  var educatorCountGeneration = 0;
+
+  function validEducatorFolderKey(value) {
+    return validEducatorId(value) && value.indexOf('f_') === 0;
+  }
+  function loadEducatorExpandedFolders() {
+    var expanded = Object.create(null);
+    try {
+      var saved = JSON.parse(readLS(EDUCATOR_EXPANDED_KEY, '[]'));
+      if (!Array.isArray(saved)) return expanded;
+      saved.slice(0, 512).forEach(function (id) {
+        if (validEducatorFolderKey(id)) expanded[id] = true;
+      });
+    } catch (error) { }
+    return expanded;
+  }
+  function authorizeEducatorFolderPreferences() {
+    if (educatorExpandedFoldersLoaded) return;
+    educatorExpandedFolders = loadEducatorExpandedFolders();
+    educatorExpandedFoldersLoaded = true;
+  }
+  function suspendEducatorFolderPreferences() {
+    educatorExpandedFolders = Object.create(null);
+    educatorExpandedFoldersLoaded = false;
+    removeLS(EDUCATOR_EXPANDED_KEY);
+  }
+  function educatorFolderKey(id) {
+    return validEducatorFolderKey(id) ? id : '';
+  }
+  function educatorFolderIsCollapsed(id) {
+    return !educatorExpandedFolders[educatorFolderKey(id)];
+  }
+  function setEducatorFolderCollapsed(id, collapsed) {
+    var key = educatorFolderKey(id);
+    if (!key) return true;
+    if (collapsed) delete educatorExpandedFolders[key];
+    else educatorExpandedFolders[key] = true;
+    writeLS(EDUCATOR_EXPANDED_KEY, JSON.stringify(Object.keys(educatorExpandedFolders)));
+    return !!collapsed;
+  }
+  function canonicalizeEducatorExpandedFolders(folders, clearAll) {
+    var allowed = Object.create(null);
+    var next = Object.create(null);
+    if (!clearAll) {
+      (folders || []).forEach(function (folder) {
+        if (folder && validEducatorFolderKey(folder.id)) allowed[folder.id] = true;
+      });
+      Object.keys(educatorExpandedFolders).forEach(function (id) {
+        if (allowed[id]) next[id] = true;
+      });
+    }
+    var before = Object.keys(educatorExpandedFolders).sort().join('|');
+    var after = Object.keys(next).sort().join('|');
+    educatorExpandedFolders = next;
+    if (clearAll || before !== after) writeLS(EDUCATOR_EXPANDED_KEY, JSON.stringify(Object.keys(next)));
+  }
+
+  function educatorCountCacheKey(profile, capture) {
+    if (!capture || !validEducatorId(capture.id) || capture.id.indexOf('c_') !== 0
+      || !Number.isSafeInteger(+capture.revision) || +capture.revision < 0) return '';
+    return String(profile || '') + '|' + capture.id + '|' + (+capture.revision);
+  }
+  function educatorCachedCaptureCounts(profile, capture, allowExpired) {
+    var key = educatorCountCacheKey(profile, capture);
+    var cached = key && educatorCountCache[key];
+    var unavailable = !!cached && cached.unavailable === true
+      && cached.detection_count === null && cached.species_count === null;
+    var numeric = !!cached && Number.isSafeInteger(cached.detection_count)
+      && cached.detection_count >= 0 && Number.isSafeInteger(cached.species_count)
+      && cached.species_count >= 0;
+    if ((!unavailable && !numeric) || !Number.isFinite(cached.fetched_at)) return null;
+    var ttl = unavailable ? EDUCATOR_COUNT_UNAVAILABLE_TTL_MS : EDUCATOR_COUNT_CACHE_TTL_MS;
+    return allowExpired || Date.now() - cached.fetched_at < ttl ? cached : null;
+  }
+  function hydrateEducatorCaptureCounts(state) {
+    if (!state) return state;
+    state.captures.forEach(function (capture) {
+      var cached = educatorCachedCaptureCounts(state.profile_epoch, capture, true);
+      if (!cached) return;
+      if (cached.unavailable === true
+        && Number.isSafeInteger(capture.detection_count) && capture.detection_count >= 0
+        && Number.isSafeInteger(capture.species_count) && capture.species_count >= 0) {
+        capture._countsUnavailable = false;
+        return;
+      }
+      capture._countsUnavailable = cached.unavailable === true;
+      if (capture.detection_count === null) capture.detection_count = cached.detection_count;
+      if (capture.species_count === null) capture.species_count = cached.species_count;
+    });
+    if (state.active) {
+      var active = state.captures.find(function (capture) { return capture.id === state.active.id; });
+      if (active) state.active = active;
+    }
+    return state;
+  }
+  function mergeEducatorCaptureCounts(prior, capture) {
+    if (!prior || !capture || +prior.revision !== +capture.revision) return capture;
+    if (capture._countsUnavailable) return capture;
+    if (capture.detection_count !== null && capture.species_count !== null) return capture;
+    capture = Object.assign({}, capture);
+    if (capture.detection_count === null && prior.detection_count !== null) {
+      capture.detection_count = prior.detection_count;
+    }
+    if (capture.species_count === null && prior.species_count !== null) {
+      capture.species_count = prior.species_count;
+    }
+    return capture;
+  }
+  function stopEducatorCountObservation(options) {
+    options = options || {};
+    if (educatorCountObserver) {
+      educatorCountObserver.disconnect();
+      educatorCountObserver = null;
+    }
+    if (educatorCountRoot && educatorCountFallbackHandler) {
+      educatorCountRoot.removeEventListener('scroll', educatorCountFallbackHandler);
+      window.removeEventListener('resize', educatorCountFallbackHandler);
+    }
+    if (educatorCountFallbackTimer) {
+      clearTimeout(educatorCountFallbackTimer);
+      educatorCountFallbackTimer = null;
+    }
+    if (educatorCountExpiryTimer) {
+      clearTimeout(educatorCountExpiryTimer);
+      educatorCountExpiryTimer = null;
+    }
+    educatorCountRoot = null;
+    educatorCountFallbackHandler = null;
+    educatorCountQueue = Object.create(null);
+    if (options.invalidate) {
+      var abandoned = educatorCountRequest;
+      if (abandoned) {
+        abandoned.ids.forEach(function (id) {
+          delete educatorCountAttempted[abandoned.profile + '|' + id + '|' + abandoned.revisions[id]];
+        });
+      }
+      educatorCountGeneration += 1;
+      educatorCountRequest = null;
+    }
+  }
+  function clearEducatorCountState() {
+    stopEducatorCountObservation({ invalidate: true });
+    educatorCountCache = Object.create(null);
+    educatorCountAttempted = Object.create(null);
+  }
+
+  function educatorStateSignature(value) {
+    if (!value || value.ok === false || value.enabled === false) return '';
+    var profile = value.profile_epoch === undefined || value.profile_epoch === null
+      ? '' : String(value.profile_epoch).slice(0, 80);
+    var revision = Number.isFinite(+value.state_revision) ? +value.state_revision : 0;
+    function count(item, key) {
+      return item && item[key] !== null && item[key] !== undefined && item[key] !== ''
+        && Number.isFinite(+item[key]) ? +item[key] : '';
+    }
+    function capture(item) {
+      return [
+        item && item.id || '',
+        count(item, 'revision'),
+        item && item.status || '',
+        item && item.folder_id || '',
+        count(item, 'detection_count'),
+        count(item, 'species_count'),
+        count(item, 'segment_count'),
+      ];
+    }
+    var folders = Array.isArray(value.folders) ? value.folders.map(function (folder) {
+      return [folder && folder.id || '', count(folder, 'revision'), count(folder, 'capture_count')];
+    }) : [];
+    var captures = Array.isArray(value.captures) ? value.captures.map(capture) : [];
+    var page = value.capture_page || {};
+    return profile + '|' + revision + '|' + JSON.stringify({
+      active: capture(value.active),
+      captures: captures,
+      folders: folders,
+      page: [count(page, 'total'), !!page.more, page.next_cursor || ''],
+    });
+  }
+  function updateEducatorStatus() {
+    if (!adminBody) return;
+    var status = adminBody.querySelector('.educator-status');
+    if (!status) return;
+    status.textContent = educatorStatusMessage;
+    status.classList.toggle('error', educatorStatusError);
+  }
+  function rememberEducatorFocus() {
+    if (adminBody && typeof adminBody.querySelector === 'function') {
+      var startInput = adminBody.querySelector('#educatorStartName');
+      if (startInput) educatorStartDraft = String(startInput.value || '').slice(0, 80);
+      var folderInput = adminBody.querySelector('#educatorFolderName');
+      if (folderInput) educatorFolderDraft = String(folderInput.value || '').slice(0, 80);
+    }
+    if (educatorFocusSelector || !adminBody) return;
+    var focused = document.activeElement;
+    if (!focused || !adminBody.contains(focused)) return;
+    if (typeof educatorActionMenuState !== 'undefined' && educatorActionMenuState
+      && educatorActionMenuState.menu.contains(focused)) {
+      educatorFocusSelector = validEducatorId(educatorActionMenuState.id)
+        ? '#educator-' + educatorActionMenuState.id + ' [data-educator-menu-trigger]'
+        : '[data-folder-create-open]';
+      return;
+    }
+    if (typeof educatorMoveState !== 'undefined' && educatorMoveState
+      && educatorMoveState.popover.contains(focused) && validEducatorId(educatorMoveState.id)) {
+      educatorFocusSelector = '#educator-' + educatorMoveState.id + ' [data-educator-menu-trigger]';
+      return;
+    }
+    if (focused.id === 'educatorFolderName') {
+      educatorFocusSelector = '#educatorFolderName';
+      return;
+    }
+    if (focused.id === 'educatorStartName') {
+      educatorFocusSelector = '#educatorStartName';
+      return;
+    }
+    if (focused.matches && focused.matches('[data-educator-start-submit]')) {
+      educatorFocusSelector = '[data-educator-start-submit]';
+      return;
+    }
+    if (focused.matches && focused.matches('[data-folder-create-open]')) {
+      educatorFocusSelector = '[data-folder-create-open]';
+      return;
+    }
+    if (focused.matches && focused.matches('[data-educator-saved]')) {
+      educatorFocusSelector = '[data-educator-saved]';
+      return;
+    }
+    if (focused.matches && focused.matches('[data-live-audio-toggle]')) {
+      educatorFocusSelector = '[data-educator-live] [data-live-audio-toggle]';
+      return;
+    }
+    var pairs = [
+      ['educatorAction', 'data-educator-action'],
+      ['viewCapture', 'data-view-capture'],
+      ['viewFolder', 'data-view-folder'],
+      ['educatorMenuId', 'data-educator-menu-id'],
+      ['folderToggle', 'data-folder-toggle'],
+    ];
+    for (var i = 0; i < pairs.length; i++) {
+      var value = focused.dataset && focused.dataset[pairs[i][0]];
+      if (!value || !/^[a-z0-9_-]+$/i.test(value)) continue;
+      educatorFocusSelector = '[' + pairs[i][1] + '="' + value + '"]';
+      if (focused.dataset.id && validEducatorId(focused.dataset.id)) {
+        educatorFocusSelector += '[data-id="' + focused.dataset.id + '"]';
+      } else if (focused.dataset.renameId && validEducatorId(focused.dataset.renameId)) {
+        educatorFocusSelector += '[data-rename-id="' + focused.dataset.renameId + '"]';
+      }
+      return;
+    }
+    if (focused.matches && focused.matches('[data-load-older]')) educatorFocusSelector = '[data-load-older]';
+    else if (focused.matches && focused.matches('[data-display-mode]')) educatorFocusSelector = '[data-display-mode]';
+  }
+  function restoreEducatorFocus() {
+    if (!educatorFocusSelector || !adminBody) return false;
+    var selector = educatorFocusSelector;
+    educatorFocusSelector = '';
+    var focus = adminBody.querySelector(selector);
+    if (!focus) return false;
+    var hiddenFolderBody = focus.closest && focus.closest('.educator-folder-body[hidden]');
+    if (hiddenFolderBody) {
+      var folder = hiddenFolderBody.closest && hiddenFolderBody.closest('.educator-folder');
+      var caret = folder && folder.querySelector('[data-folder-toggle]');
+      if (caret) focus = caret;
+    }
+    focusEl(focus);
+    return true;
+  }
+
+  function normalizeEducatorState(value) {
+    if (!value || value.ok === false || value.enabled === false) return null;
+    function optionalNumber(number) {
+      if (number === null || number === undefined || number === '') return null;
+      return Number.isFinite(+number) ? Math.max(0, +number) : null;
+    }
+    function capture(item) {
+      if (!item || !validEducatorId(item.id) || item.id.indexOf('c_') !== 0) return null;
+      var status = /^(running|paused|stopped)$/.test(item.status || '') ? item.status : 'stopped';
+      return {
+        id: item.id,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 80) : 'Listening period',
+        status: status,
+        folder_id: validEducatorId(item.folder_id) && item.folder_id.indexOf('f_') === 0 ? item.folder_id : null,
+        started_at: typeof item.started_at === 'string' ? item.started_at : '',
+        stopped_at: typeof item.stopped_at === 'string' ? item.stopped_at : '',
+        revision: Number.isFinite(+item.revision) ? +item.revision : 0,
+        segment_count: optionalNumber(item.segment_count),
+        duration_seconds: optionalNumber(item.duration_seconds),
+        segments: Array.isArray(item.segments) ? item.segments.filter(function (segment) {
+          return segment && typeof segment.started_at === 'string';
+        }).map(function (segment) {
+          return { started_at: segment.started_at, stopped_at: typeof segment.stopped_at === 'string' ? segment.stopped_at : '' };
+        }) : [],
+        detection_count: optionalNumber(item.detection_count),
+        species_count: optionalNumber(item.species_count),
+      };
+    }
+    function folder(item) {
+      if (!item || !validEducatorId(item.id) || item.id.indexOf('f_') !== 0) return null;
+      return {
+        id: item.id,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 80) : 'Folder',
+        revision: Number.isFinite(+item.revision) ? +item.revision : 0,
+        capture_count: Number.isFinite(+item.capture_count) ? +item.capture_count : 0,
+      };
+    }
+    var captures = (Array.isArray(value.captures) ? value.captures : []).map(capture).filter(Boolean);
+    var folders = (Array.isArray(value.folders) ? value.folders : []).map(folder).filter(Boolean);
+    var active = capture(value.active);
+    if (active) {
+      var activeIndex = captures.findIndex(function (item) { return item.id === active.id; });
+      if (activeIndex === -1) captures.unshift(active);
+      else captures[activeIndex] = active;
+    }
+    return {
+      ok: true,
+      enabled: true,
+      profile_epoch: value.profile_epoch === undefined || value.profile_epoch === null
+        ? '' : String(value.profile_epoch).slice(0, 80),
+      state_revision: Number.isFinite(+value.state_revision) ? +value.state_revision : 0,
+      server_time: value.server_time || {},
+      active: active,
+      captures: captures,
+      folders: folders,
+      capture_page: {
+        total: value.capture_page && Number.isFinite(+value.capture_page.total) ? +value.capture_page.total : captures.length,
+        more: !!(value.capture_page && value.capture_page.more),
+        next_cursor: value.capture_page && typeof value.capture_page.next_cursor === 'string'
+          ? value.capture_page.next_cursor.slice(0, 512) : null,
+      },
+    };
+  }
+  function resetEducatorCaptureArchive() {
+    educatorCaptureArchive = Object.create(null);
+    educatorCaptureOrder = [];
+    educatorCapturePage = { total: 0, more: false, next_cursor: null };
+    educatorCaptureArchiveRevision = null;
+  }
+  function mergeEducatorCaptures(captures, page, mode) {
+    captures = captures || [];
+    if (mode === 'replace') {
+      educatorCaptureArchive = Object.create(null);
+      educatorCaptureOrder = [];
+    }
+    var incoming = [];
+    captures.forEach(function (capture) {
+      if (!capture || !validEducatorId(capture.id) || educatorCaptureArchive[capture.id]) {
+        if (capture && educatorCaptureArchive[capture.id]
+          && capture.revision >= educatorCaptureArchive[capture.id].revision) {
+          educatorCaptureArchive[capture.id] = typeof mergeEducatorCaptureCounts === 'function'
+            ? mergeEducatorCaptureCounts(educatorCaptureArchive[capture.id], capture) : capture;
+        }
+        return;
+      }
+      educatorCaptureArchive[capture.id] = capture;
+      incoming.push(capture.id);
+    });
+    if (mode === 'head') {
+      var head = captures.map(function (capture) { return capture.id; });
+      var headSet = Object.create(null);
+      head.forEach(function (id) { headSet[id] = true; });
+      educatorCaptureOrder = head.concat(educatorCaptureOrder.filter(function (id) { return !headSet[id]; }));
+    } else {
+      educatorCaptureOrder = educatorCaptureOrder.concat(incoming);
+    }
+    page = page || {};
+    educatorCapturePage.total = Number.isFinite(+page.total) ? +page.total : educatorCaptureOrder.length;
+    educatorCapturePage.more = !!page.more;
+    educatorCapturePage.next_cursor = typeof page.next_cursor === 'string' ? page.next_cursor : null;
+    return educatorCaptureOrder.map(function (id) { return educatorCaptureArchive[id]; }).filter(Boolean);
+  }
+  function educatorCapture(id) {
+    return educatorState && educatorState.captures.find(function (item) { return item.id === id; });
+  }
+  function educatorFolder(id) {
+    return educatorState && educatorState.folders.find(function (item) { return item.id === id; });
+  }
+  function educatorScopeForEntity(entity, stateRevision) {
+    return entity ? {
+      id: entity.id,
+      label: entity.name,
+      automatic: false,
+      revision: entity.revision || 0,
+      state_revision: Number.isFinite(+stateRevision) ? +stateRevision : 0,
+      status: entity.status || '',
+    } : null;
+  }
+  function acceptEducatorState(value, options) {
+    options = options || {};
+    var next = normalizeEducatorState(value);
+    if (!next) return false;
+    var profileChanged = educatorState && educatorState.profile_epoch && next.profile_epoch
+      && educatorState.profile_epoch !== next.profile_epoch;
+    if (profileChanged) {
+      if (typeof clearEducatorCountState === 'function') clearEducatorCountState();
+      closeEducatorTransientUi();
+      educatorEditing = null;
+      educatorPendingState = null;
+      educatorStartDraft = '';
+      educatorFolderDraft = '';
+      educatorFolderComposerOpen = false;
+      educatorLiveWide = false;
+      educatorFocusSelector = '';
+      applyEducatorScope(null, { refresh: true, immediateTitle: true });
+    }
+    if (typeof hydrateEducatorCaptureCounts === 'function') hydrateEducatorCaptureCounts(next);
+    canonicalizeEducatorExpandedFolders(next.folders, profileChanged);
+    if (educatorState && educatorState.profile_epoch === next.profile_epoch
+      && next.state_revision < educatorState.state_revision) return false;
+    if (educatorEditing && !options.force) {
+      educatorPendingState = next;
+      return true;
+    }
+    var revisionChanged = educatorCaptureArchiveRevision !== null
+      && educatorCaptureArchiveRevision !== next.state_revision;
+    if (profileChanged || revisionChanged || educatorCaptureArchiveRevision === null) {
+      resetEducatorCaptureArchive();
+      next.captures = mergeEducatorCaptures(next.captures, next.capture_page, 'replace');
+    } else {
+      var priorPage = educatorCapturePage;
+      next.captures = mergeEducatorCaptures(next.captures, priorPage, 'head');
+      educatorCapturePage.total = next.capture_page.total;
+      educatorCapturePage.more = educatorCaptureOrder.length < educatorCapturePage.total && priorPage.more;
+      educatorCapturePage.next_cursor = priorPage.next_cursor;
+    }
+    educatorCaptureArchiveRevision = next.state_revision;
+    next.capture_page = educatorCapturePage;
+    educatorState = next;
+    // Sign the bounded server page, not the merged local archive. Otherwise
+    // loading older rows would make every unchanged head poll look different.
+    educatorAcceptedSignature = educatorStateSignature(value);
+    window.__educatorState = next;
+    educatorPendingState = null;
+
+    var explicit = explicitEducatorScope && (next.captures.concat(next.folders)).find(function (item) {
+      return item.id === explicitEducatorScope.id;
+    });
+    if (explicit) {
+      applyEducatorScope(educatorScopeForEntity(explicit, next.state_revision), { explicit: true, refresh: true });
+    } else if (explicitEducatorScope) {
+      // Folder state is complete, but capture state is paged. A saved capture
+      // missing from the first page is not proof that it was deleted. Its data
+      // endpoint remains authoritative and clears the scope on 404 or 409.
+      if (explicitEducatorScope.kind === 'folder') applyEducatorScope(null, { refresh: true });
+      else syncEducatorScopePill();
+    } else if (next.active) {
+      var activeScope = educatorScopeForEntity(next.active, next.state_revision);
+      activeScope.automatic = true;
+      activeScope = normalizeEducatorScope(activeScope);
+      if (effectiveEducatorScope && effectiveEducatorScope.automatic
+        && (!effectiveEducatorScope.entity_id || !activeScope.entity_id
+          || effectiveEducatorScope.entity_id === activeScope.entity_id)) {
+        activeScope.state_key = effectiveEducatorScope.state_key;
+      }
+      applyEducatorScope(activeScope, { explicit: false, refresh: true });
+    } else if (effectiveEducatorScope && effectiveEducatorScope.automatic) {
+      applyEducatorScope(null, { explicit: false, refresh: true });
+    }
+    return true;
+  }
+  function educatorPost(action, fields) {
+    if (educatorActionBusy || !educatorState) return Promise.reject(new Error('action already running'));
+    educatorActionBusy = true;
+    if (adminBody) adminBody.setAttribute('aria-busy', 'true');
+    var payload = Object.assign({ action: action, state_revision: educatorState.state_revision }, fields || {});
+    return adminFetch('./avian/api/educators.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+      body: JSON.stringify(payload),
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (response.status === 409) {
+          var conflict = new Error('Changed in another tab.');
+          conflict.conflict = true;
+          throw conflict;
+        }
+        if (!response.ok || body.ok === false) throw new Error(body.error || 'Action unavailable.');
+        return body;
+      });
+    }).then(function (body) {
+      educatorStatusMessage = '';
+      educatorStatusError = false;
+      return body;
+    }).catch(function (error) {
+      if (!adminAuthCancelled(error)) {
+        educatorStatusMessage = error.message || 'Action unavailable.';
+        educatorStatusError = true;
+      }
+      throw error;
+    }).finally(function () {
+      educatorActionBusy = false;
+      if (adminBody) adminBody.setAttribute('aria-busy', 'false');
+    });
+  }
+  function clearEducatorPrivateFrontendState() {
+    closeEducatorTransientUi();
+    if (typeof clearEducatorCountState === 'function') clearEducatorCountState();
+    if (educatorElapsedTimer) { clearInterval(educatorElapsedTimer); educatorElapsedTimer = null; }
+    educatorStateRequest += 1;
+    educatorState = null;
+    window.__educatorState = null;
+    educatorEditing = null;
+    educatorPendingState = null;
+    educatorActionBusy = false;
+    educatorStatusMessage = '';
+    educatorStatusError = false;
+    educatorStartDraft = '';
+    educatorFolderDraft = '';
+    educatorFolderComposerOpen = false;
+    educatorLiveWide = false;
+    educatorFocusSelector = '';
+    educatorAcceptedSignature = '';
+    educatorOlderBusy = false;
+    removeLS(EDUCATOR_SCOPE_KEY);
+    suspendEducatorFolderPreferences();
+    resetEducatorCaptureArchive();
+    var privateBody = adminBody && (adminSect === 'educators'
+      || (adminBody.querySelector
+        && adminBody.querySelector('.educator-workspace, .educator-loading')));
+    if (privateBody) {
+      liveAudioController.unmount();
+      adminBody.replaceChildren();
+      adminBody.setAttribute('aria-busy', 'false');
+    }
+  }
+  function disableEducatorsFrontend() {
+    scrubEducatorScopeSurface(educatorScopeId());
+    educatorsAvailable = false;
+    educatorScopesAuthorized = false;
+    pendingAdminSection = null;
+    clearEducatorPrivateFrontendState();
+    requestDisplayMode(false);
+    if (explicitEducatorScope || effectiveEducatorScope) {
+      if (educatorScopeShared) blockEducatorScope();
+      else applyEducatorScope(null, { refresh: true, immediateTitle: true });
+    }
+    if (location.hash === '#admin=educators' && window.history && history.replaceState) {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+    closeAdmin({ focusPublicEducator: true });
+    tryAutoUnlock();
+  }
+  function educatorLoad(options) {
+    options = options || {};
+    var request = ++educatorStateRequest;
+    return adminJson('./avian/api/educators.php').then(function (value) {
+      if (request !== educatorStateRequest || adminSect !== 'educators') return;
+      if (value && value.enabled === false) {
+        disableEducatorsFrontend();
+        return;
+      }
+      var signature = educatorStateSignature(value);
+      if (!options.force && signature && signature === educatorAcceptedSignature) {
+        educatorStatusMessage = '';
+        educatorStatusError = false;
+        updateEducatorStatus();
+        return;
+      }
+      rememberEducatorFocus();
+      if (!acceptEducatorState(value, options)) throw new Error('Educators unavailable.');
+      if (educatorEditing && educatorPendingState && !options.force) return;
+      paintEducators();
+    }).catch(function (error) {
+      if (adminAuthCancelled(error) || request !== educatorStateRequest || adminSect !== 'educators') return;
+      if (error && (error.status === 404 || error.status === 410)) {
+        disableEducatorsFrontend();
+        return;
+      }
+      var liveWorkspace = adminBody && adminBody.querySelector('[data-educator-live]');
+      if (liveWorkspace) {
+        educatorStatusMessage = error.message || 'Listening periods unavailable.';
+        educatorStatusError = true;
+        updateEducatorStatus();
+      } else {
+        liveAudioController.unmount();
+        adminBody.innerHTML = adminUnreachableHtml(error.message || 'Educators unavailable.');
+      }
+    });
+  }
+  function educatorLoadOlder() {
+    if (educatorOlderBusy || !educatorState || !educatorCapturePage.more || !educatorCapturePage.next_cursor) return;
+    educatorOlderBusy = true;
+    var cursor = educatorCapturePage.next_cursor;
+    var revision = educatorState.state_revision;
+    var profile = educatorState.profile_epoch;
+    var priorScroll = adminEl ? adminEl.scrollTop : 0;
+    educatorFocusSelector = '[data-load-older]';
+    paintEducators();
+    if (adminEl) adminEl.scrollTop = priorScroll;
+    return adminJson('./avian/api/educators.php?action=captures&cursor=' + encodeURIComponent(cursor) + '&limit=100')
+      .then(function (value) {
+        var page = normalizeEducatorState(value);
+        // A head poll can advance the profile or revision while this older
+        // page is in flight. Never merge a response into a different current
+        // archive, even when it still matches the values captured at click.
+        if (!educatorState || educatorState.profile_epoch !== profile
+          || educatorState.state_revision !== revision) {
+          educatorOlderBusy = false;
+          paintEducators();
+          return;
+        }
+        if (!page || page.profile_epoch !== educatorState.profile_epoch
+          || page.state_revision !== educatorState.state_revision) {
+          resetEducatorCaptureArchive();
+          educatorOlderBusy = false;
+          return educatorLoad({ force: true });
+        }
+        var priorIds = Object.create(null);
+        educatorCaptureOrder.forEach(function (id) { priorIds[id] = true; });
+        educatorState.captures = mergeEducatorCaptures(page.captures, page.capture_page, 'append');
+        educatorState.capture_page = educatorCapturePage;
+        var firstNew = page.captures.find(function (capture) { return !priorIds[capture.id]; });
+        educatorFocusSelector = educatorCapturePage.more ? '[data-load-older]'
+          : (firstNew ? '#educator-' + firstNew.id + ' [data-view-capture]' : '');
+        educatorOlderBusy = false;
+        paintEducators();
+        if (adminEl) adminEl.scrollTop = priorScroll;
+      }).catch(function (error) {
+        educatorOlderBusy = false;
+        if (!adminAuthCancelled(error)) {
+          educatorStatusMessage = error.message || 'Older listening periods unavailable.';
+          educatorStatusError = true;
+          educatorFocusSelector = '[data-load-older]';
+          paintEducators();
+        }
+      }).finally(function () { educatorOlderBusy = false; });
+  }
+  function educatorDurationSeconds(capture) {
+    var total = 0;
+    var now = Date.now();
+    var segments = capture && capture.segments || [];
+    if (!segments.length && capture && capture.duration_seconds !== null) {
+      return Math.max(0, Math.floor(capture.duration_seconds));
+    }
+    if (!segments.length && capture && capture.started_at) {
+      segments = [{ started_at: capture.started_at, stopped_at: capture.stopped_at }];
+    }
+    segments.forEach(function (segment) {
+      var start = Date.parse(segment.started_at);
+      var stop = segment.stopped_at ? Date.parse(segment.stopped_at) : now;
+      if (!isNaN(start) && !isNaN(stop) && stop >= start) total += (stop - start) / 1000;
+    });
+    return Math.max(0, Math.floor(total));
+  }
+  function educatorDurationLabel(seconds) {
+    seconds = Math.max(0, Math.floor(seconds || 0));
+    var hours = Math.floor(seconds / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    var rest = seconds % 60;
+    return (hours ? hours + ':' + String(minutes).padStart(2, '0') : minutes) + ':' + String(rest).padStart(2, '0');
+  }
+  function educatorDateLabel(value) {
+    var date = new Date(value || '');
+    if (isNaN(date.getTime())) return '';
+    return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function educatorCaptureAccessibleLabel(capture, duration, started) {
+    var birds = capture.species_count === null ? '' : String(capture.species_count);
+    var calls = capture.detection_count === null ? '' : String(capture.detection_count);
+    return 'View ' + capture.name + '. Duration ' + duration + '. '
+      + (capture._countsUnavailable ? 'Bird and call counts unavailable. '
+        : (birds ? birds + (birds === '1' ? ' bird' : ' birds') : 'Bird count unavailable') + '. '
+          + (calls ? calls + (calls === '1' ? ' call' : ' calls') : 'Call count unavailable') + '. ')
+      + (started ? 'Started ' + started : 'Start time unavailable') + '.';
+  }
+  function educatorCaptureNeedsCounts(capture) {
+    if (!capture || capture.status !== 'stopped' || !educatorState
+      || educatorState.active && educatorState.active.id === capture.id) return false;
+    var cached = educatorCachedCaptureCounts(educatorState.profile_epoch, capture);
+    if (cached) {
+      if (cached.unavailable === true
+        && Number.isSafeInteger(capture.detection_count) && capture.detection_count >= 0
+        && Number.isSafeInteger(capture.species_count) && capture.species_count >= 0) {
+        capture._countsUnavailable = false;
+        return false;
+      }
+      capture.detection_count = cached.detection_count;
+      capture.species_count = cached.species_count;
+      capture._countsUnavailable = cached.unavailable === true;
+      return false;
+    }
+    var stale = educatorCachedCaptureCounts(educatorState.profile_epoch, capture, true);
+    if (stale) {
+      capture.detection_count = stale.detection_count;
+      capture.species_count = stale.species_count;
+      capture._countsUnavailable = stale.unavailable === true;
+    } else if (capture.detection_count !== null && capture.species_count !== null) return false;
+    var key = educatorCountCacheKey(educatorState.profile_epoch, capture);
+    var attemptedAt = key && educatorCountAttempted[key] || 0;
+    return !!key && (!attemptedAt || Date.now() - attemptedAt >= EDUCATOR_COUNT_RETRY_MS);
+  }
+  function educatorCountRowAvailable(row) {
+    return !!(row && row.isConnected !== false
+      && !(row.closest && row.closest('.educator-folder-body[hidden]')));
+  }
+  function queueEducatorCountRow(row) {
+    if (!educatorCountRowAvailable(row)) return false;
+    var id = row.dataset && row.dataset.captureId;
+    var capture = educatorCapture(id);
+    if (!capture || String(capture.revision) !== String(row.dataset.captureRevision)
+      || !educatorCaptureNeedsCounts(capture)) return false;
+    if (educatorCountRequest && educatorCountRequest.ids.indexOf(id) !== -1) return false;
+    educatorCountQueue[id] = true;
+    return true;
+  }
+  function educatorCountResponse(value, request) {
+    if (!value || value.ok !== true || value.enabled !== true
+      || typeof value.profile_epoch !== 'number' || !Number.isSafeInteger(value.profile_epoch)
+      || value.profile_epoch < 0 || String(value.profile_epoch) !== request.profile
+      || typeof value.state_revision !== 'number' || !Number.isSafeInteger(value.state_revision)
+      || value.state_revision < 0 || value.state_revision !== request.stateRevision
+      || !value.counts || typeof value.counts !== 'object' || Array.isArray(value.counts)) return null;
+    var keys = Object.keys(value.counts);
+    if (keys.length !== request.ids.length) return null;
+    var normalized = Object.create(null);
+    for (var i = 0; i < keys.length; i++) {
+      var id = keys[i];
+      var count = value.counts[id];
+      var unavailable = !!count && count.detection_count === null && count.species_count === null;
+      var numeric = !!count && typeof count.detection_count === 'number'
+        && Number.isSafeInteger(count.detection_count) && count.detection_count >= 0
+        && typeof count.species_count === 'number'
+        && Number.isSafeInteger(count.species_count) && count.species_count >= 0;
+      if (request.ids.indexOf(id) === -1 || !count || typeof count !== 'object'
+        || typeof count.revision !== 'number' || !Number.isSafeInteger(count.revision)
+        || count.revision < 0 || count.revision !== request.revisions[id]
+        || (!unavailable && !numeric)) return null;
+      normalized[id] = {
+        revision: count.revision,
+        detection_count: count.detection_count,
+        species_count: count.species_count,
+        unavailable: unavailable,
+      };
+    }
+    return normalized;
+  }
+  function educatorCountRequestCurrent(request) {
+    if (!request || request !== educatorCountRequest || request.generation !== educatorCountGeneration
+      || adminSect !== 'educators' || !educatorState
+      || educatorState.profile_epoch !== request.profile
+      || educatorState.state_revision !== request.stateRevision || document.hidden) return false;
+    return request.ids.every(function (id) {
+      var capture = educatorCapture(id);
+      return capture && capture.status === 'stopped' && +capture.revision === request.revisions[id];
+    });
+  }
+  function patchEducatorCaptureCounts(capture) {
+    if (!adminBody || adminSect !== 'educators' || !capture) return false;
+    var row = adminBody.querySelector('#educator-' + capture.id);
+    if (!row || row.dataset.captureId !== capture.id
+      || String(row.dataset.captureRevision) !== String(capture.revision)) return false;
+    var unavailable = capture._countsUnavailable === true;
+    var birds = unavailable ? 'n/a' : String(capture.species_count);
+    var calls = unavailable ? 'n/a' : String(capture.detection_count);
+    var birdCell = row.querySelector('.educator-birds');
+    var callCell = row.querySelector('.educator-calls');
+    var compactCell = row.querySelector('.educator-counts');
+    var view = row.querySelector('[data-view-capture]');
+    if (birdCell) birdCell.textContent = birds;
+    if (callCell) callCell.textContent = calls;
+    if (compactCell) compactCell.textContent = unavailable ? 'n/a' : birds + 'b / ' + calls + 'c';
+    if (view) view.setAttribute('aria-label', educatorCaptureAccessibleLabel(
+      capture,
+      educatorDurationLabel(educatorDurationSeconds(capture)),
+      educatorDateLabel(capture.started_at)
+    ));
+    row.removeAttribute('data-count-pending');
+    if (unavailable) row.setAttribute('data-count-unavailable', 'true');
+    else row.removeAttribute('data-count-unavailable');
+    return true;
+  }
+  function applyEducatorCaptureCounts(counts, request) {
+    if (!educatorCountRequestCurrent(request)) return false;
+    request.ids.forEach(function (id) {
+      var capture = educatorCapture(id);
+      var count = counts[id];
+      var key = educatorCountCacheKey(request.profile, capture);
+      if (!capture || !count || !key) return;
+      educatorCountCache[key] = {
+        revision: count.revision,
+        detection_count: count.detection_count,
+        species_count: count.species_count,
+        unavailable: count.unavailable,
+        fetched_at: Date.now(),
+      };
+      capture.detection_count = count.detection_count;
+      capture.species_count = count.species_count;
+      capture._countsUnavailable = count.unavailable;
+      if (educatorCaptureArchive[id]) {
+        educatorCaptureArchive[id].detection_count = count.detection_count;
+        educatorCaptureArchive[id].species_count = count.species_count;
+        educatorCaptureArchive[id]._countsUnavailable = count.unavailable;
+      }
+      patchEducatorCaptureCounts(capture);
+    });
+    scheduleEducatorCountExpiry();
+    return true;
+  }
+  function requestEducatorCaptureCounts(ids) {
+    if (educatorCountRequest || !educatorState || adminSect !== 'educators' || document.hidden) return false;
+    var profile = educatorState.profile_epoch;
+    if (!/^\d+$/.test(profile) || !Number.isSafeInteger(educatorState.state_revision)
+      || educatorState.state_revision < 0) return false;
+    var revisions = Object.create(null);
+    ids = ids.filter(function (id, index) {
+      var capture = educatorCapture(id);
+      if (index >= EDUCATOR_COUNT_BATCH_MAX || ids.indexOf(id) !== index || !educatorCaptureNeedsCounts(capture)) return false;
+      revisions[id] = +capture.revision;
+      return true;
+    });
+    if (!ids.length) return false;
+    var request = {
+      generation: educatorCountGeneration,
+      profile: profile,
+      stateRevision: educatorState.state_revision,
+      ids: ids,
+      revisions: revisions,
+    };
+    educatorCountRequest = request;
+    ids.forEach(function (id) {
+      educatorCountAttempted[educatorCountCacheKey(profile, educatorCapture(id))] = Date.now();
+    });
+    var url = './avian/api/educators.php?action=capture-counts&ids=' + encodeURIComponent(ids.join(','))
+      + '&state_revision=' + encodeURIComponent(request.stateRevision);
+    adminJson(url).then(function (value) {
+      if (!educatorCountRequestCurrent(request)) return;
+      var counts = educatorCountResponse(value, request);
+      if (counts) applyEducatorCaptureCounts(counts, request);
+    }).catch(function (error) {
+      if (adminAuthCancelled(error)) return;
+    }).finally(function () {
+      if (educatorCountRequest !== request) return;
+      var current = educatorCountRequestCurrent(request);
+      educatorCountRequest = null;
+      if (!current) {
+        request.ids.forEach(function (id) {
+          delete educatorCountAttempted[request.profile + '|' + id + '|' + request.revisions[id]];
+        });
+        observeEducatorCaptureCounts();
+        return;
+      }
+      drainEducatorCountQueue();
+      if (educatorCountFallbackHandler) scheduleEducatorCountScan();
+      scheduleEducatorCountExpiry();
+    });
+    return true;
+  }
+  function drainEducatorCountQueue() {
+    if (educatorCountRequest || !educatorState || adminSect !== 'educators' || document.hidden) return false;
+    var ids = [];
+    Object.keys(educatorCountQueue).some(function (id) {
+      delete educatorCountQueue[id];
+      var row = adminBody && adminBody.querySelector('#educator-' + id);
+      if (!educatorCountRowAvailable(row) || !queueEducatorCountRow(row)) return false;
+      delete educatorCountQueue[id];
+      ids.push(id);
+      return ids.length === EDUCATOR_COUNT_BATCH_MAX;
+    });
+    return ids.length ? requestEducatorCaptureCounts(ids) : false;
+  }
+  function educatorFallbackRowVisible(row, root) {
+    if (!educatorCountRowAvailable(row)) return false;
+    if (!row.getBoundingClientRect || !root.getBoundingClientRect) return true;
+    var rowRect = row.getBoundingClientRect();
+    var rootRect = root.getBoundingClientRect();
+    return rowRect.bottom > rootRect.top && rowRect.top < rootRect.bottom
+      && rowRect.right > rootRect.left && rowRect.left < rootRect.right;
+  }
+  function scanEducatorCountRows() {
+    educatorCountFallbackTimer = null;
+    var root = educatorCountRoot;
+    if (!root || adminSect !== 'educators') return false;
+    var queued = 0;
+    [].slice.call(root.querySelectorAll('[data-count-pending="true"]')).some(function (row) {
+      if (!educatorFallbackRowVisible(row, root) || !queueEducatorCountRow(row)) return false;
+      queued += 1;
+      return queued === EDUCATOR_COUNT_BATCH_MAX;
+    });
+    drainEducatorCountQueue();
+    return !!queued;
+  }
+  function scheduleEducatorCountScan() {
+    if (educatorCountFallbackTimer) return;
+    educatorCountFallbackTimer = setTimeout(scanEducatorCountRows, 80);
+  }
+  function scheduleEducatorCountExpiry() {
+    if (educatorCountExpiryTimer) {
+      clearTimeout(educatorCountExpiryTimer);
+      educatorCountExpiryTimer = null;
+    }
+    if (!educatorState || adminSect !== 'educators' || document.hidden) return false;
+    var now = Date.now();
+    var nextAt = Infinity;
+    educatorState.captures.forEach(function (capture) {
+      if (!capture || capture.status !== 'stopped'
+        || educatorState.active && educatorState.active.id === capture.id) return;
+      var key = educatorCountCacheKey(educatorState.profile_epoch, capture);
+      if (!key) return;
+      var cached = educatorCountCache[key];
+      var attemptedAt = educatorCountAttempted[key] || 0;
+      var readyAt = cached && Number.isFinite(cached.fetched_at)
+        ? cached.fetched_at + (cached.unavailable === true
+          ? EDUCATOR_COUNT_UNAVAILABLE_TTL_MS : EDUCATOR_COUNT_CACHE_TTL_MS) : 0;
+      if (attemptedAt) readyAt = Math.max(readyAt, attemptedAt + EDUCATOR_COUNT_RETRY_MS);
+      if (readyAt > now) nextAt = Math.min(nextAt, readyAt);
+    });
+    if (!Number.isFinite(nextAt)) return false;
+    educatorCountExpiryTimer = setTimeout(function () {
+      educatorCountExpiryTimer = null;
+      observeEducatorCaptureCounts();
+    }, Math.max(80, nextAt - now + 5));
+    return true;
+  }
+  function observeEducatorCaptureCounts() {
+    stopEducatorCountObservation();
+    if (!educatorState || adminSect !== 'educators' || document.hidden || !adminBody) return false;
+    var root = adminBody.querySelector('[data-educator-saved]');
+    if (!root) return false;
+    var rows = [].slice.call(root.querySelectorAll('[data-capture-id]')).filter(function (row) {
+      var capture = educatorCapture(row.dataset.captureId);
+      var pending = educatorCaptureNeedsCounts(capture);
+      if (pending) row.setAttribute('data-count-pending', 'true');
+      else if (!educatorCountRequest || educatorCountRequest.ids.indexOf(row.dataset.captureId) === -1) {
+        row.removeAttribute('data-count-pending');
+      }
+      return pending && educatorCountRowAvailable(row);
+    });
+    scheduleEducatorCountExpiry();
+    if (!rows.length) return false;
+    educatorCountRoot = root;
+    if (window.IntersectionObserver) {
+      var observer = new IntersectionObserver(function (entries) {
+        if (educatorCountObserver !== observer) return;
+        entries.forEach(function (entry) {
+          if (!entry.isIntersecting || !queueEducatorCountRow(entry.target)) return;
+          observer.unobserve(entry.target);
+        });
+        drainEducatorCountQueue();
+      }, { root: root, threshold: 0.01 });
+      educatorCountObserver = observer;
+      rows.forEach(function (row) { observer.observe(row); });
+    } else {
+      educatorCountFallbackHandler = scheduleEducatorCountScan;
+      root.addEventListener('scroll', educatorCountFallbackHandler, { passive: true });
+      window.addEventListener('resize', educatorCountFallbackHandler, { passive: true });
+      scanEducatorCountRows();
+    }
+    return true;
+  }
+  function educatorFolderOptions(selected) {
+    var html = '<option value=""' + (!selected ? ' selected' : '') + '>Unfiled</option>';
+    (educatorState && educatorState.folders || []).forEach(function (folder) {
+      html += '<option value="' + adminAttr(folder.id) + '"' + (folder.id === selected ? ' selected' : '') + '>'
+        + adminEsc(folder.name) + '</option>';
+    });
+    return html;
+  }
+  function educatorRenameHtml(kind, item) {
+    var editing = educatorEditing && educatorEditing.kind === kind && educatorEditing.id === item.id;
+    return '<form class="educator-rename" data-rename-form="' + kind + '" data-rename-id="' + adminAttr(item.id) + '"'
+      + (editing ? '' : ' hidden') + '>'
+      + '<label class="sr-only" for="rename-' + adminAttr(item.id) + '">Rename ' + kind + '</label>'
+      + '<input id="rename-' + adminAttr(item.id) + '" name="name" maxlength="80" value="' + adminAttr(item.name) + '" required>'
+      + '<button type="submit">save</button><button type="button" data-rename-cancel>cancel</button></form>';
+  }
+  function educatorMoreButton(kind, item, hidden) {
+    return '<button type="button" class="educator-more" data-educator-menu-trigger data-educator-menu-kind="' + kind
+      + '" data-educator-menu-id="' + adminAttr(item.id) + '" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for '
+      + adminAttr(item.name) + '"' + (hidden ? ' hidden' : '') + '>' + ICON_MORE_VERTICAL + '</button>';
+  }
+  function educatorCaptureRow(capture) {
+    var editing = educatorEditing && educatorEditing.kind === 'capture' && educatorEditing.id === capture.id;
+    var countsUnavailable = capture._countsUnavailable === true;
+    var birds = countsUnavailable ? 'n/a'
+      : (capture.species_count === null ? '' : String(capture.species_count));
+    var calls = countsUnavailable ? 'n/a'
+      : (capture.detection_count === null ? '' : String(capture.detection_count));
+    var duration = educatorDurationLabel(educatorDurationSeconds(capture));
+    var started = educatorDateLabel(capture.started_at);
+    var compactCounts = countsUnavailable ? 'n/a'
+      : ((birds || calls) ? (birds || '?') + 'b / ' + (calls || '?') + 'c' : '');
+    var headingId = 'educator-capture-heading-' + capture.id;
+    var accessibleLabel = typeof educatorCaptureAccessibleLabel === 'function'
+      ? educatorCaptureAccessibleLabel(capture, duration, started)
+      : 'View ' + capture.name + '. Duration ' + duration + '. '
+        + (birds ? birds + (birds === '1' ? ' bird' : ' birds') : 'Bird count unavailable') + '. '
+        + (calls ? calls + (calls === '1' ? ' call' : ' calls') : 'Call count unavailable') + '. '
+        + (started ? 'Started ' + started : 'Start time unavailable') + '.';
+    var needsCounts = typeof educatorCaptureNeedsCounts === 'function'
+      ? educatorCaptureNeedsCounts(capture)
+      : capture.status === 'stopped'
+        && (capture.detection_count === null || capture.species_count === null);
+    return '<li class="educator-capture" id="educator-' + adminAttr(capture.id) + '" data-capture-id="' + adminAttr(capture.id)
+      + '" data-capture-revision="' + adminAttr(capture.revision) + '"'
+      + (needsCounts ? ' data-count-pending="true"' : '')
+      + (countsUnavailable ? ' data-count-unavailable="true"' : '')
+      + ' data-educator-row-kind="capture" data-educator-row-id="' + adminAttr(capture.id) + '">'
+      + '<span class="sr-only" role="heading" aria-level="3" id="' + adminAttr(headingId) + '" data-capture-heading'
+      + (editing ? ' hidden' : '') + '>' + adminEsc(capture.name) + '</span>'
+      + '<button type="button" class="educator-row-view" data-view-capture="' + adminAttr(capture.id) + '" aria-label="'
+      + adminAttr(accessibleLabel) + '"' + (editing ? ' hidden' : '') + '><span class="educator-period-grid" aria-hidden="true">'
+      + '<span class="educator-inline-name">' + adminEsc(capture.name) + '</span>'
+      + '<span class="educator-stat educator-duration">' + duration + '</span>'
+      + '<span class="educator-stat educator-birds">' + birds + '</span>'
+      + '<span class="educator-stat educator-calls">' + calls + '</span>'
+      + '<time class="educator-stat educator-started" datetime="' + adminAttr(capture.started_at) + '">' + adminEsc(started) + '</time>'
+      + '<span class="educator-stat educator-counts">' + compactCounts + '</span>'
+      + '</span></button>'
+      + educatorRenameHtml('capture', capture)
+      + educatorMoreButton('capture', capture, editing) + '</li>';
+  }
+  function educatorFolderGroup(folder, captures, expectedTotal) {
+    var id = folder.id;
+    var collapsed = educatorFolderIsCollapsed(id);
+    var editing = educatorEditing && educatorEditing.kind === 'folder' && educatorEditing.id === folder.id;
+    var headingId = 'educator-title-' + folder.id;
+    var bodyId = 'educator-items-' + folder.id;
+    var accessibleName = folder.name;
+    var total = Number.isFinite(+expectedTotal) ? Math.max(captures.length, +expectedTotal) : captures.length;
+    var count = captures.length < total ? captures.length + ' of ' + total : String(total);
+    var accessibleCount = captures.length < total
+      ? count + ' listening periods loaded'
+      : count + (total === 1 ? ' listening period' : ' listening periods');
+    return '<section class="educator-folder" id="educator-' + adminAttr(folder.id)
+      + '" aria-label="' + adminAttr(accessibleName) + '" data-collapsed="' + (collapsed ? 'true' : 'false') + '">'
+      + '<header class="educator-folder-row" data-educator-row-kind="folder" data-educator-row-id="' + adminAttr(id) + '">'
+      + '<button type="button" class="educator-row-view educator-folder-view" data-view-folder="' + adminAttr(id) + '" data-folder-heading aria-label="View '
+      + adminAttr(accessibleName) + '. ' + adminAttr(accessibleCount) + '."' + (editing ? ' hidden' : '') + '><span class="educator-inline-name" id="' + adminAttr(headingId) + '">'
+      + adminEsc(folder.name) + '</span><span class="educator-count">' + count + '</span></button>'
+      + educatorRenameHtml('folder', folder) + educatorMoreButton('folder', folder, editing)
+      + '<button type="button" class="educator-caret" data-folder-toggle="' + adminAttr(id) + '" aria-expanded="' + (collapsed ? 'false' : 'true')
+      + '" aria-controls="' + adminAttr(bodyId) + '" aria-label="' + (collapsed ? 'Expand ' : 'Collapse ') + adminAttr(accessibleName)
+      + '"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 2 4 4-4 4"/></svg></button></header>'
+      + '<div class="educator-folder-body" id="' + adminAttr(bodyId) + '"' + (collapsed ? ' hidden' : '') + '>'
+      + (captures.length ? '<ol>' + captures.map(educatorCaptureRow).join('') + '</ol>'
+        : '<p class="educator-empty">' + (total ? 'Load older to see listening periods.' : 'No listening periods.') + '</p>')
+      + '</div></section>';
+  }
+  function syncEducatorStartSubmit(input) {
+    if (!input) return false;
+    var form = input.form || (input.closest && input.closest('form'));
+    var button = form && form.querySelector('[data-educator-start-submit]');
+    var hasName = !!String(input.value || '').trim();
+    if (button) {
+      button.setAttribute('data-has-name', hasName ? 'true' : 'false');
+      button.setAttribute('aria-label', hasName
+        ? 'Start new listening period' : 'Start new listening period with date and time');
+    }
+    return hasName;
+  }
+  function educatorActiveHtml(active) {
+    if (!active) {
+      return '<form class="educator-active educator-start" id="educatorStart"><label for="educatorStartName"><span class="label">New listening period</span></label>'
+        + '<div class="educator-start-action"><input id="educatorStartName" name="name" maxlength="80" value="' + adminAttr(educatorStartDraft)
+        + '" placeholder="session name" autocomplete="off"><button type="submit" data-educator-start-submit data-has-name="'
+        + (String(educatorStartDraft || '').trim() ? 'true' : 'false') + '" aria-label="'
+        + (String(educatorStartDraft || '').trim() ? 'Start new listening period' : 'Start new listening period with date and time') + '">'
+        + '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7h8.5M7.5 3.5 11 7l-3.5 3.5"/></svg></button></div></form>';
+    }
+    var running = active.status === 'running';
+    var editing = educatorEditing && educatorEditing.kind === 'capture' && educatorEditing.id === active.id;
+    return '<div class="educator-active" id="educator-' + adminAttr(active.id) + '" data-status="' + adminAttr(active.status)
+      + '" data-educator-row-kind="active" data-educator-row-id="' + adminAttr(active.id) + '">'
+      + '<div class="educator-active-head"><div class="educator-active-copy"' + (editing ? ' hidden' : '') + '><span class="educator-state"><i aria-hidden="true"></i>' + adminEsc(active.status) + '</span>'
+      + '<strong>' + adminEsc(active.name) + '</strong>'
+      + '<time data-educator-elapsed data-capture-id="' + adminAttr(active.id) + '">' + educatorDurationLabel(educatorDurationSeconds(active)) + '</time></div>'
+      + educatorRenameHtml('capture', active) + educatorMoreButton('active', active, editing) + '</div>'
+      + '<div class="educator-row-actions"><button type="button" data-educator-action="' + (running ? 'pause' : 'resume') + '" data-id="' + adminAttr(active.id) + '" aria-label="'
+      + (running ? 'Pause ' : 'Resume ') + adminAttr(active.name) + '">'
+      + (running ? 'pause' : 'resume') + '</button>'
+      + '<button type="button" class="educator-primary" data-educator-action="stop" data-id="' + adminAttr(active.id) + '" aria-label="Stop ' + adminAttr(active.name) + '">stop</button></div></div>';
+  }
+  function educatorLivePanelHtml() {
+    return '<section class="educator-live-panel admin-card" data-live-panel data-wide="' + (educatorLiveWide ? 'true' : 'false') + '">'
+      + '<div class="educator-live" data-educator-live></div></section>';
+  }
+  function educatorDisplayHtml() {
+    return '<div class="educator-display admin-card"><div class="menu-row"><div><span class="label">Display mode</span><span class="hint">'
+      + 'Hide page controls until you move to an edge.'
+      + '</span></div><button type="button" class="switch" role="switch" aria-label="Display mode" aria-checked="'
+      + (displayModeEnabled() ? 'true' : 'false') + '" aria-disabled="false" data-display-mode></button></div></div>';
+  }
+  function updateEducatorElapsed() {
+    if (!adminBody || adminSect !== 'educators') return;
+    adminBody.querySelectorAll('[data-educator-elapsed]').forEach(function (time) {
+      var capture = educatorCapture(time.dataset.captureId);
+      if (capture) time.textContent = educatorDurationLabel(educatorDurationSeconds(capture));
+    });
+  }
+  function replaceEducatorBody(html) {
+    if (typeof stopEducatorCountObservation === 'function') stopEducatorCountObservation();
+    var currentLive = adminBody.querySelector('[data-educator-live]');
+    var currentSaved = adminBody.querySelector('[data-educator-saved]');
+    var savedScroll = currentSaved ? currentSaved.scrollTop : 0;
+    closeEducatorActionMenu(false);
+    closeEducatorMovePopover(false);
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    var nextLive = template.content.querySelector('[data-educator-live]');
+    if (currentLive && nextLive && nextLive.parentNode) {
+      nextLive.parentNode.replaceChild(currentLive, nextLive);
+    }
+    adminBody.replaceChildren(template.content);
+    var nextSaved = adminBody.querySelector('[data-educator-saved]');
+    if (nextSaved) nextSaved.scrollTop = savedScroll;
+  }
+  function paintEducators() {
+    if (!educatorState || adminSect !== 'educators') return;
+    var activeId = educatorState.active && educatorState.active.id;
+    var saved = educatorState.captures.filter(function (capture) { return capture.id !== activeId; });
+    var folderComposer = educatorFolderComposerOpen
+      ? '<form class="educator-new-folder" id="educatorNewFolder"><label class="sr-only" for="educatorFolderName">Folder name</label>'
+        + '<input id="educatorFolderName" name="name" maxlength="80" value="' + adminAttr(educatorFolderDraft)
+        + '" placeholder="Folder name" required><button type="submit">create</button><button type="button" data-folder-create-cancel>cancel</button></form>'
+      : '';
+    var savedHtml = '<div class="educator-saved-header"><div class="educator-saved-header-row">'
+      + '<div class="educator-table-head" aria-hidden="true"><span class="educator-name-head">Listening period</span><span class="educator-duration-head">Duration</span><span class="educator-birds-head">Birds</span><span class="educator-calls-head">Calls</span><span class="educator-started-head">Started</span><span class="educator-counts-head">Birds / calls</span></div>'
+      + '<button type="button" class="educator-folder-add" data-folder-create-open aria-label="Create new folder" aria-expanded="'
+      + (educatorFolderComposerOpen ? 'true' : 'false') + '"' + (educatorFolderComposerOpen ? ' aria-controls="educatorNewFolder"' : '')
+      + '>' + ICON_FOLDER_PLUS + '</button></div>' + folderComposer + '</div>';
+    educatorState.folders.forEach(function (folder) {
+      var folderTotal = Math.max(0, (folder.capture_count || 0)
+        - (educatorState.active && educatorState.active.folder_id === folder.id ? 1 : 0));
+      savedHtml += educatorFolderGroup(folder, saved.filter(function (capture) { return capture.folder_id === folder.id; }), folderTotal);
+    });
+    var unfiled = saved.filter(function (capture) { return !capture.folder_id; });
+    if (unfiled.length) {
+      savedHtml += '<ol class="educator-unfiled" aria-label="Unfiled listening periods">'
+        + unfiled.map(educatorCaptureRow).join('') + '</ol>';
+    } else if (!educatorState.folders.length) {
+      savedHtml += '<p class="educator-empty educator-saved-empty">No listening periods.</p>';
+    }
+    if (educatorCapturePage.more) {
+      savedHtml += '<div class="educator-load-older"><button type="button" data-load-older'
+        + (educatorOlderBusy ? ' disabled aria-busy="true"' : '') + '>'
+        + (educatorOlderBusy ? 'loading...' : 'load older') + '</button><span>'
+        + educatorCaptureOrder.length + ' of ' + educatorCapturePage.total + '</span></div>';
+    }
+    var html = '<div class="educator-workspace' + (educatorLiveWide ? ' live-wide' : '') + '"><aside class="educator-controls" aria-label="Listening controls">'
+      + educatorActiveHtml(educatorState.active) + educatorLivePanelHtml() + educatorDisplayHtml()
+      + '<p class="educator-status' + (educatorStatusError ? ' error' : '') + '" role="status" aria-live="polite" aria-atomic="true">'
+      + adminEsc(educatorStatusMessage) + '</p></aside>'
+      + '<section class="educator-saved" data-educator-saved tabindex="0" aria-labelledby="educatorSavedTitle"><h2 class="sr-only" id="educatorSavedTitle">Saved listening periods</h2>'
+      + savedHtml + '</section></div>';
+    replaceEducatorBody(html);
+    wireEducators();
+    var liveHost = adminBody.querySelector('[data-educator-live]');
+    if (liveHost) liveAudioController.mount(liveHost, educatorLiveMountOptions());
+    updateEducatorElapsed();
+    if (educatorElapsedTimer) clearInterval(educatorElapsedTimer);
+    educatorElapsedTimer = setInterval(updateEducatorElapsed, 1000);
+    if (educatorEditing) {
+      var editForm = adminBody.querySelector('[data-rename-form="' + educatorEditing.kind + '"][data-rename-id="' + educatorEditing.id + '"]');
+      if (editForm) {
+        var input = editForm.querySelector('input');
+        if (input) { input.focus(); input.select(); }
+      }
+    } else {
+      restoreEducatorFocus();
+    }
+    if (typeof observeEducatorCaptureCounts === 'function') observeEducatorCaptureCounts();
+  }
+  function finishEducatorAction(message) {
+    educatorStatusMessage = message || '';
+    educatorStatusError = false;
+    return educatorLoad({ force: true });
+  }
+  function handleEducatorActionError(error) {
+    if (adminAuthCancelled(error)) return;
+    if (error && error.conflict) {
+      educatorLoad({ force: true });
+      return;
+    }
+    if (!educatorStatusMessage) {
+      educatorStatusMessage = error && error.message || 'Action unavailable.';
+      educatorStatusError = true;
+    }
+    updateEducatorStatus();
+  }
+  function beginEducatorRename(kind, id) {
+    var item = kind === 'capture' ? educatorCapture(id) : educatorFolder(id);
+    if (!item) return;
+    educatorEditing = { kind: kind, id: id };
+    paintEducators();
+  }
+  function closeEducatorRename(kind, id) {
+    educatorEditing = null;
+    educatorFocusSelector = kind === 'capture' && validEducatorId(id)
+      ? '#educator-' + id + ' [data-educator-menu-trigger]'
+      : (kind === 'folder' && validEducatorId(id)
+        ? '#educator-' + id + ' [data-view-folder]' : '');
+  }
+  function cancelEducatorRename() {
+    var editing = educatorEditing;
+    closeEducatorRename(editing && editing.kind, editing && editing.id);
+    if (educatorPendingState) {
+      var pending = educatorPendingState;
+      educatorPendingState = null;
+      acceptEducatorState(pending, { force: true });
+    }
+    paintEducators();
+  }
+  function viewEducatorEntity(entity) {
+    if (!entity || !validEducatorId(entity.id)) return false;
+    applyEducatorScope(educatorScopeForEntity(entity, educatorState.state_revision), { explicit: true, refresh: true });
+    closeAdmin({ focusPublicEducator: true });
+    if (location.hash) location.hash = '';
+    return true;
+  }
+  function clearSubmittedEducatorFolderDraft(submittedDraft) {
+    submittedDraft = String(submittedDraft || '').slice(0, 80);
+    if (educatorFolderDraft !== submittedDraft) return false;
+    var current = adminBody && adminBody.querySelector('#educatorFolderName');
+    if (current && String(current.value || '').slice(0, 80) !== submittedDraft) return false;
+    if (current) current.value = '';
+    educatorFolderDraft = '';
+    educatorFolderComposerOpen = false;
+    return true;
+  }
+  function clearSubmittedEducatorStartDraft(submittedDraft) {
+    submittedDraft = String(submittedDraft || '').slice(0, 80);
+    if (educatorStartDraft !== submittedDraft) return false;
+    var current = adminBody && adminBody.querySelector('#educatorStartName');
+    if (current && String(current.value || '').slice(0, 80) !== submittedDraft) return false;
+    if (current) current.value = '';
+    educatorStartDraft = '';
+    syncEducatorStartSubmit(current);
+    return true;
+  }
+  function educatorActionMenuItems(kind) {
+    function item(action, label, icon, danger) {
+      return '<button type="button" role="menuitem" tabindex="-1" data-educator-menu-action="' + action + '"'
+        + (danger ? ' class="educator-remove"' : '') + '><span class="educator-action-icon">'
+        + icon + '</span><span>' + label + '</span></button>';
+    }
+    if (kind === 'capture') {
+      return item('move', 'Move', ICON_MOVE) + item('rename', 'Rename', ICON_RENAME)
+        + item('remove', 'Remove', ICON_REMOVE, true);
+    }
+    if (kind === 'active') return item('move', 'Move', ICON_MOVE) + item('rename', 'Rename', ICON_RENAME);
+    if (kind === 'folder') return item('rename', 'Rename', ICON_RENAME) + item('remove', 'Remove', ICON_REMOVE, true);
+    if (kind === 'pane') return item('create-folder', 'Create new folder', ICON_FOLDER_PLUS);
+    return '';
+  }
+  function positionEducatorPopover(popover, anchor, point) {
+    if (!popover || !popover.getBoundingClientRect) return;
+    var margin = 8;
+    var rect = popover.getBoundingClientRect();
+    var anchorRect = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+    var left = point && Number.isFinite(+point.x) ? +point.x
+      : (anchorRect ? anchorRect.right - rect.width : margin);
+    var top = point && Number.isFinite(+point.y) ? +point.y
+      : (anchorRect ? anchorRect.bottom + 5 : margin);
+    left = Math.max(margin, Math.min(left, Math.max(margin, window.innerWidth - rect.width - margin)));
+    top = Math.max(margin, Math.min(top, Math.max(margin, window.innerHeight - rect.height - margin)));
+    popover.style.left = Math.round(left) + 'px';
+    popover.style.top = Math.round(top) + 'px';
+  }
+  function closeEducatorActionMenu(restoreFocus) {
+    var state = educatorActionMenuState;
+    if (!state) return false;
+    educatorActionMenuState = null;
+    if (state.trigger && state.trigger.setAttribute) {
+      state.trigger.setAttribute('aria-expanded', 'false');
+      state.trigger.removeAttribute('aria-controls');
+    }
+    if (state.menu && state.menu.remove) state.menu.remove();
+    if (restoreFocus && state.returnFocus && adminBody && adminBody.contains(state.returnFocus)) {
+      focusEl(state.returnFocus);
+    }
+    return true;
+  }
+  function openEducatorActionMenu(kind, id, trigger, point) {
+    if (kind === 'capture' && !educatorCapture(id)) return false;
+    if (kind === 'active' && !educatorCapture(id)) return false;
+    if (kind === 'folder' && !educatorFolder(id)) return false;
+    if (kind !== 'capture' && kind !== 'active' && kind !== 'folder' && kind !== 'pane') return false;
+    if (kind === 'pane') id = 'pane';
+    if (educatorActionMenuState && educatorActionMenuState.trigger === trigger && !point) {
+      closeEducatorActionMenu(true);
+      return false;
+    }
+    closeEducatorMovePopover(false);
+    closeEducatorActionMenu(false);
+    var menu = document.createElement('div');
+    menu.className = 'educator-action-menu';
+    menu.id = 'educatorActionMenu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', kind === 'capture' || kind === 'active' ? 'Listening period actions'
+      : (kind === 'folder' ? 'Folder actions' : 'Saved listening period actions'));
+    menu.innerHTML = educatorActionMenuItems(kind);
+    adminBody.appendChild(menu);
+    var returnFocus = trigger && adminBody.contains(trigger) ? trigger : null;
+    educatorActionMenuState = { kind: kind, id: id, trigger: trigger, returnFocus: returnFocus, menu: menu };
+    if (trigger && trigger.setAttribute && trigger.matches && trigger.matches('[data-educator-menu-trigger]')) {
+      trigger.setAttribute('aria-expanded', 'true');
+      trigger.setAttribute('aria-controls', menu.id);
+    }
+    positionEducatorPopover(menu, trigger, point);
+    var first = menu.querySelector('[role="menuitem"]');
+    if (first) focusEl(first);
+    return true;
+  }
+  function closeEducatorMovePopover(restoreFocus) {
+    var state = educatorMoveState;
+    if (!state) return false;
+    educatorMoveState = null;
+    if (state.popover && state.popover.remove) state.popover.remove();
+    if (restoreFocus && state.returnFocus && adminBody && adminBody.contains(state.returnFocus)) {
+      focusEl(state.returnFocus);
+    }
+    return true;
+  }
+  function openEducatorMovePopover(id, returnFocus) {
+    var capture = educatorCapture(id);
+    if (!capture) return false;
+    closeEducatorMovePopover(false);
+    var popover = document.createElement('div');
+    popover.className = 'educator-move-popover';
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-modal', 'false');
+    popover.setAttribute('aria-labelledby', 'educatorMoveTitle');
+    popover.innerHTML = '<form data-educator-move-form><strong id="educatorMoveTitle">Move listening period</strong>'
+      + '<label for="educatorMoveFolder">Folder</label><select id="educatorMoveFolder" name="folder" data-educator-move-select>'
+      + educatorFolderOptions(capture.folder_id) + '</select><div><button type="button" data-educator-move-cancel>cancel</button>'
+      + '<button type="submit" class="educator-primary">move</button></div></form>';
+    adminBody.appendChild(popover);
+    educatorMoveState = { id: capture.id, popover: popover, returnFocus: returnFocus };
+    positionEducatorPopover(popover, returnFocus, null);
+    var form = popover.querySelector('[data-educator-move-form]');
+    var select = popover.querySelector('[data-educator-move-select]');
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var current = educatorCapture(capture.id);
+      if (!current || educatorActionBusy) return;
+      var folderId = select.value || null;
+      if ((current.folder_id || null) === folderId) {
+        closeEducatorMovePopover(true);
+        return;
+      }
+      educatorPost('move-capture', { id: current.id, revision: current.revision, folder_id: folderId })
+        .then(function () {
+          closeEducatorMovePopover(false);
+          educatorFocusSelector = '#educator-' + current.id + ' [data-educator-menu-trigger]';
+          return finishEducatorAction('Listening period moved.');
+        }).catch(handleEducatorActionError);
+    });
+    var cancel = popover.querySelector('[data-educator-move-cancel]');
+    if (cancel) cancel.addEventListener('click', function () { closeEducatorMovePopover(true); });
+    if (select) focusEl(select);
+    return true;
+  }
+  function focusEducatorNewFolder() {
+    var input = adminBody && adminBody.querySelector('#educatorFolderName');
+    if (!input) {
+      educatorFolderComposerOpen = true;
+      educatorFocusSelector = '#educatorFolderName';
+      paintEducators();
+      input = adminBody && adminBody.querySelector('#educatorFolderName');
+    }
+    if (!input) return false;
+    focusEl(input);
+    if (input.value && input.select) input.select();
+    return true;
+  }
+  function cancelEducatorNewFolder() {
+    educatorFolderComposerOpen = false;
+    educatorFolderDraft = '';
+    educatorFocusSelector = '[data-folder-create-open]';
+    paintEducators();
+    return true;
+  }
+  function removeEducatorCapture(id) {
+    var capture = educatorCapture(id);
+    if (!capture || !confirm('Remove this saved listening period? Detections and recordings stay on the station.')) return false;
+    educatorPost('delete-capture', { id: capture.id, revision: capture.revision }).then(function () {
+      if (educatorScopeId() === capture.id) applyEducatorScope(null, { refresh: true });
+      educatorFocusSelector = capture.folder_id
+        ? '#educator-' + capture.folder_id + ' [data-folder-heading]'
+        : '[data-folder-create-open]';
+      return finishEducatorAction('Listening period removed.');
+    }).catch(handleEducatorActionError);
+    return true;
+  }
+  function removeEducatorFolder(id) {
+    var folder = educatorFolder(id);
+    if (!folder || !confirm('Remove this folder? Its listening periods move to Unfiled.')) return false;
+    var moved = educatorState.captures.find(function (capture) {
+      return capture.folder_id === folder.id && (!educatorState.active || capture.id !== educatorState.active.id);
+    });
+    educatorPost('delete-folder', { id: folder.id, revision: folder.revision }).then(function () {
+      if (educatorScopeId() === folder.id) applyEducatorScope(null, { refresh: true });
+      educatorFocusSelector = moved
+        ? '#educator-' + moved.id + ' [data-view-capture]'
+        : '[data-folder-create-open]';
+      return finishEducatorAction('Folder removed.');
+    }).catch(handleEducatorActionError);
+    return true;
+  }
+  function activateEducatorMenuAction(action) {
+    var state = educatorActionMenuState;
+    if (!state || !action) return false;
+    var kind = state.kind;
+    var id = state.id;
+    var returnFocus = state.returnFocus;
+    closeEducatorActionMenu(false);
+    if (action === 'create-folder' && kind === 'pane') return focusEducatorNewFolder();
+    if (action === 'move' && (kind === 'capture' || kind === 'active')) return openEducatorMovePopover(id, returnFocus);
+    if (action === 'rename' && (kind === 'capture' || kind === 'active' || kind === 'folder')) {
+      beginEducatorRename(kind === 'active' ? 'capture' : kind, id);
+      return true;
+    }
+    if (action === 'remove') {
+      var removed = kind === 'capture' ? removeEducatorCapture(id)
+        : (kind === 'folder' ? removeEducatorFolder(id) : false);
+      if (!removed && returnFocus && adminBody.contains(returnFocus)) focusEl(returnFocus);
+      return removed;
+    }
+    return false;
+  }
+  function toggleEducatorFolder(button) {
+    if (!button) return false;
+    var section = button.closest && button.closest('.educator-folder');
+    var body = section && section.querySelector('.educator-folder-body');
+    if (!section || !body) return false;
+    var collapsed = button.getAttribute('aria-expanded') === 'true';
+    setEducatorFolderCollapsed(button.dataset.folderToggle === 'unfiled' ? '' : button.dataset.folderToggle, collapsed);
+    section.setAttribute('data-collapsed', collapsed ? 'true' : 'false');
+    button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    button.setAttribute('aria-label', (collapsed ? 'Expand ' : 'Collapse ')
+      + (section.querySelector('.educator-inline-name') ? section.querySelector('.educator-inline-name').textContent : 'folder'));
+    body.hidden = collapsed;
+    if (typeof observeEducatorCaptureCounts === 'function') observeEducatorCaptureCounts();
+    return true;
+  }
+  function setEducatorLiveWide(expanded) {
+    educatorLiveWide = !!expanded;
+    var workspace = adminBody && adminBody.querySelector('.educator-workspace');
+    var panel = adminBody && adminBody.querySelector('[data-live-panel]');
+    if (workspace) workspace.classList.toggle('live-wide', educatorLiveWide);
+    if (panel) panel.setAttribute('data-wide', educatorLiveWide ? 'true' : 'false');
+    return true;
+  }
+  function educatorLiveCanExpand() {
+    if (educatorLiveWideQuery) return !!educatorLiveWideQuery.matches;
+    return !Number.isFinite(+window.innerWidth) || +window.innerWidth > 900;
+  }
+  function educatorLiveMountOptions() {
+    return {
+      protectedStream: !!adminAuthMeta.required,
+      expandable: educatorLiveCanExpand(),
+      expanded: educatorLiveWide,
+      onExpandedChange: setEducatorLiveWide,
+    };
+  }
+  function syncEducatorLiveBreakpoint() {
+    if (!educatorLiveCanExpand() && educatorLiveWide) setEducatorLiveWide(false);
+    if (!adminBody || adminSect !== 'educators') return false;
+    var liveHost = adminBody.querySelector('[data-educator-live]');
+    if (!liveHost) return false;
+    liveAudioController.mount(liveHost, educatorLiveMountOptions());
+    return true;
+  }
+  function educatorContextTarget(target) {
+    if (!target || !target.closest) return null;
+    if (target.closest('input, textarea, select, [contenteditable="true"], .educator-action-menu, .educator-move-popover')) return null;
+    var row = target.closest('[data-educator-row-kind]');
+    if (row) return { kind: row.dataset.educatorRowKind, id: row.dataset.educatorRowId, anchor: row };
+    var saved = target.closest('[data-educator-saved]');
+    if (!saved || target.closest('button, a, form')) return null;
+    return { kind: 'pane', id: 'pane', anchor: saved };
+  }
+  function educatorContextReturnFocus(anchor) {
+    if (!anchor || !anchor.querySelector) return null;
+    return anchor.querySelector('[data-rename-form]:not([hidden]) input, .educator-row-view:not([hidden]), [data-educator-menu-trigger]:not([hidden]), [data-folder-toggle]');
+  }
+  function handleEducatorContextMenu(event) {
+    if (adminSect !== 'educators') return;
+    var target = educatorContextTarget(event.target);
+    if (!target) return;
+    event.preventDefault();
+    var returnFocus = educatorContextReturnFocus(target.anchor);
+    openEducatorActionMenu(target.kind, target.id, returnFocus || target.anchor, { x: event.clientX, y: event.clientY });
+  }
+  function handleEducatorAdminClick(event) {
+    if (adminSect !== 'educators' || !event.target.closest) return;
+    var action = event.target.closest('[data-educator-menu-action]');
+    if (action) {
+      event.preventDefault();
+      event.stopPropagation();
+      activateEducatorMenuAction(action.dataset.educatorMenuAction);
+      return;
+    }
+    var folderAdd = event.target.closest('[data-folder-create-open]');
+    if (folderAdd) {
+      event.preventDefault();
+      event.stopPropagation();
+      focusEducatorNewFolder();
+      return;
+    }
+    var trigger = event.target.closest('[data-educator-menu-trigger]');
+    if (trigger) {
+      event.preventDefault();
+      event.stopPropagation();
+      openEducatorActionMenu(trigger.dataset.educatorMenuKind, trigger.dataset.educatorMenuId, trigger, null);
+      return;
+    }
+    var caret = event.target.closest('[data-folder-toggle]');
+    if (caret) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleEducatorFolder(caret);
+      return;
+    }
+  }
+  function handleEducatorAdminKeydown(event) {
+    if (adminSect !== 'educators') return;
+    if (educatorActionMenuState && educatorActionMenuState.menu.contains(event.target)) {
+      var items = [].slice.call(educatorActionMenuState.menu.querySelectorAll('[role="menuitem"]'));
+      var index = items.indexOf(event.target);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeEducatorActionMenu(true);
+        return;
+      }
+      if (event.key === 'Tab') {
+        // Return focus to the trigger before the browser performs its normal
+        // Tab move, so removal of the focused fixed menu is never a dead end.
+        closeEducatorActionMenu(true);
+        return;
+      }
+      var next = null;
+      if (event.key === 'ArrowDown') next = index < 0 ? 0 : (index + 1) % items.length;
+      else if (event.key === 'ArrowUp') next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = items.length - 1;
+      if (next !== null && items[next]) {
+        event.preventDefault();
+        focusEl(items[next]);
+      }
+      return;
+    }
+    if (educatorMoveState && event.key === 'Escape') {
+      event.preventDefault();
+      closeEducatorMovePopover(true);
+      return;
+    }
+    var contextKey = event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey);
+    if (!contextKey || !event.target.closest) return;
+    var trigger = event.target.closest('[data-educator-menu-trigger]');
+    var target = trigger ? {
+      kind: trigger.dataset.educatorMenuKind,
+      id: trigger.dataset.educatorMenuId,
+      anchor: trigger,
+    } : educatorContextTarget(event.target);
+    if (!target) return;
+    event.preventDefault();
+    openEducatorActionMenu(target.kind, target.id,
+      trigger || educatorContextReturnFocus(target.anchor) || target.anchor, null);
+  }
+  function handleEducatorOutsidePointer(event) {
+    if (educatorActionMenuState
+      && !educatorActionMenuState.menu.contains(event.target)
+      && !(educatorActionMenuState.trigger && educatorActionMenuState.trigger.contains
+        && educatorActionMenuState.trigger.contains(event.target))) closeEducatorActionMenu(false);
+    if (educatorMoveState && !educatorMoveState.popover.contains(event.target)) closeEducatorMovePopover(false);
+  }
+  function closeEducatorTransientUi(restoreFocused) {
+    var active = restoreFocused ? document.activeElement : null;
+    var restoreMenu = !!(active && educatorActionMenuState
+      && educatorActionMenuState.menu.contains(active));
+    var restoreMove = !!(active && educatorMoveState
+      && educatorMoveState.popover.contains(active));
+    closeEducatorActionMenu(restoreMenu);
+    closeEducatorMovePopover(restoreMove);
+  }
+  function handleEducatorAdminScroll(event) {
+    if (adminSect !== 'educators' || !event || !event.target) return;
+    var target = event.target;
+    var workspacePane = target.matches
+      && target.matches('.educator-controls, [data-educator-saved]');
+    if (workspacePane || target === adminEl) closeEducatorTransientUi(true);
+  }
+  if (adminBody) {
+    adminBody.addEventListener('click', handleEducatorAdminClick);
+    adminBody.addEventListener('keydown', handleEducatorAdminKeydown);
+    adminBody.addEventListener('contextmenu', handleEducatorContextMenu);
+    adminBody.addEventListener('scroll', handleEducatorAdminScroll, true);
+  }
+  if (adminEl) adminEl.addEventListener('scroll', handleEducatorAdminScroll, { passive: true });
+  document.addEventListener('pointerdown', handleEducatorOutsidePointer, true);
+  window.addEventListener('resize', closeEducatorTransientUi);
+  if (educatorLiveWideQuery) {
+    if (educatorLiveWideQuery.addEventListener) educatorLiveWideQuery.addEventListener('change', syncEducatorLiveBreakpoint);
+    else if (educatorLiveWideQuery.addListener) educatorLiveWideQuery.addListener(syncEducatorLiveBreakpoint);
+  }
+  function wireEducators() {
+    var startForm = adminBody.querySelector('#educatorStart');
+    if (startForm) {
+      var startInput = startForm.elements.name;
+      startInput.addEventListener('input', function () {
+        educatorStartDraft = String(startInput.value || '').slice(0, 80);
+        syncEducatorStartSubmit(startInput);
+      });
+      startForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (educatorActionBusy) return;
+        var submittedDraft = String(startInput.value || '').slice(0, 80);
+        educatorStartDraft = submittedDraft;
+        var name = submittedDraft.trim();
+        educatorPost('start', name ? { name: name } : undefined).then(function (body) {
+          clearSubmittedEducatorStartDraft(submittedDraft);
+          var started = body.result && body.result.capture || body.active;
+          if (started) {
+            var activeScope = educatorScopeForEntity(started, body.state_revision);
+            activeScope.automatic = true;
+            applyEducatorScope(activeScope, { explicit: false, clearExplicit: true, refresh: true });
+            educatorFocusSelector = '[data-educator-action="pause"]';
+          }
+          return finishEducatorAction('Listening period started.');
+        }).catch(handleEducatorActionError);
+      });
+    }
+    var newFolder = adminBody.querySelector('#educatorNewFolder');
+    if (newFolder) {
+      newFolder.elements.name.addEventListener('input', function () {
+        educatorFolderDraft = String(newFolder.elements.name.value || '').slice(0, 80);
+      });
+      newFolder.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var submittedDraft = String(newFolder.elements.name.value || '').slice(0, 80);
+        var name = submittedDraft.trim();
+        if (!name) return;
+        educatorPost('create-folder', { name: name }).then(function (body) {
+          var cleared = clearSubmittedEducatorFolderDraft(submittedDraft);
+          var created = body.result && body.result.folder;
+          if (created && cleared) educatorFocusSelector = '#educator-' + created.id + ' [data-folder-heading]';
+          else if (!cleared && educatorFolderComposerOpen) educatorFocusSelector = '#educatorFolderName';
+          return finishEducatorAction('Folder created.');
+        }).catch(handleEducatorActionError);
+      });
+    }
+    var cancelNewFolder = adminBody.querySelector('[data-folder-create-cancel]');
+    if (cancelNewFolder) cancelNewFolder.addEventListener('click', cancelEducatorNewFolder);
+    adminBody.querySelectorAll('[data-educator-action]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var action = button.dataset.educatorAction;
+        var capture = educatorCapture(button.dataset.id);
+        if (!capture) return;
+        educatorPost(action, { id: capture.id, revision: capture.revision }).then(function (body) {
+          if (action === 'stop') {
+            var stopped = body.result && body.result.capture || body.active || capture;
+            applyEducatorScope(educatorScopeForEntity(stopped, body.state_revision), { explicit: true, refresh: true });
+            educatorFocusSelector = '#educator-' + capture.id + ' [data-view-capture]';
+          } else {
+            educatorFocusSelector = '[data-educator-action="' + (action === 'pause' ? 'resume' : 'pause') + '"]';
+          }
+          return finishEducatorAction(action === 'stop' ? 'Listening period saved.' : 'Listening period ' + (action === 'pause' ? 'paused.' : 'resumed.'));
+        }).catch(handleEducatorActionError);
+      });
+    });
+    adminBody.querySelectorAll('[data-view-capture]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var capture = educatorCapture(button.dataset.viewCapture);
+        viewEducatorEntity(capture);
+      });
+      button.addEventListener('keydown', function (event) {
+        if (event.key === 'F2') {
+          event.preventDefault();
+          beginEducatorRename('capture', button.dataset.viewCapture);
+        }
+      });
+    });
+    adminBody.querySelectorAll('[data-view-folder]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var folder = educatorFolder(button.dataset.viewFolder);
+        viewEducatorEntity(folder);
+      });
+      button.addEventListener('keydown', function (event) {
+        if (event.key === 'F2') {
+          event.preventDefault();
+          beginEducatorRename('folder', button.dataset.viewFolder);
+        }
+      });
+    });
+    adminBody.querySelectorAll('[data-rename-form]').forEach(function (form) {
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var kind = form.dataset.renameForm;
+        var item = kind === 'capture' ? educatorCapture(form.dataset.renameId) : educatorFolder(form.dataset.renameId);
+        var name = form.elements.name.value.trim();
+        if (!item || !name) return;
+        educatorPost('rename-' + kind, { id: item.id, revision: item.revision, name: name }).then(function () {
+          closeEducatorRename(kind, item.id);
+          return finishEducatorAction(kind === 'capture' ? 'Listening period renamed.' : 'Folder renamed.');
+        }).catch(function (error) {
+          if (error && error.conflict) closeEducatorRename(kind, item.id);
+          handleEducatorActionError(error);
+        });
+      });
+      form.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') { event.preventDefault(); cancelEducatorRename(); }
+      });
+      var cancel = form.querySelector('[data-rename-cancel]');
+      if (cancel) cancel.addEventListener('click', cancelEducatorRename);
+    });
+    var loadOlder = adminBody.querySelector('[data-load-older]');
+    if (loadOlder) loadOlder.addEventListener('click', educatorLoadOlder);
+    var displaySwitch = adminBody.querySelector('[data-display-mode]');
+    if (displaySwitch) displaySwitch.addEventListener('click', toggleEducatorDisplayMode);
+  }
+  function toggleEducatorDisplayMode() {
+    var enable = !displayModeEnabled();
+    requestDisplayMode(enable);
+    if (enable && adminSect === 'educators') {
+      if (location.hash === '#admin=educators' && window.history && history.replaceState) {
+        history.replaceState(null, '', location.pathname + location.search);
+      }
+      closeAdmin();
+      if (staticTitle) {
+        staticTitle.setAttribute('tabindex', '-1');
+        focusEl(staticTitle);
+      }
+      syncDisplayOverlayVisibility();
+    }
+    return displayModeEnabled();
+  }
+  function renderAdminEducators() {
+    if (typeof stopEducatorCountObservation === 'function') {
+      stopEducatorCountObservation({ invalidate: true });
+    }
+    closeEducatorTransientUi();
+    educatorEditing = null;
+    educatorPendingState = null;
+    educatorStatusMessage = '';
+    educatorStatusError = false;
+    educatorStartDraft = '';
+    educatorFolderDraft = '';
+    educatorFolderComposerOpen = false;
+    educatorLiveWide = false;
+    adminBody.innerHTML = '<div class="educator-loading" role="status">Loading listening periods...</div>';
+    educatorLoad({ force: true });
+    adminPollT = setInterval(function () {
+      if (!document.hidden && adminSect === 'educators' && !educatorActionBusy) educatorLoad();
+    }, 10000);
+  }
+
   var ADMIN_TITLES = {
     settings: 'Settings',
     system: 'System',
     logs: 'Logs',
     tools: 'Tools',
+    educators: 'Educators',
   };
+  function syncAdminTitlePin() {
+    adminTitleFrame = 0;
+    if (!adminEl) return;
+    var pinned = adminEl.getAttribute('data-title-pinned') === 'true';
+    // Both desktop and mobile titles travel 42px from their resting row to
+    // the fixed control line. The smaller exit threshold prevents chatter
+    // without leaving a backdrop behind a title that has already moved down.
+    var pinAt = 42;
+    var threshold = pinned ? pinAt - 8 : pinAt;
+    adminEl.setAttribute('data-title-pinned',
+      (adminSect === 'settings' || adminSect === 'educators') && adminEl.scrollTop > threshold ? 'true' : 'false');
+  }
+  function queueAdminTitlePin() {
+    if (adminTitleFrame) return;
+    adminTitleFrame = requestAnimationFrame(syncAdminTitlePin);
+  }
+  if (adminEl) adminEl.addEventListener('scroll', queueAdminTitlePin, { passive: true });
   function adminEsc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function adminAttr(s) {
+    return adminEsc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function adminCopyText(text) {
     function legacyCopy() {
@@ -7241,29 +12077,109 @@
     if (s < 86400) return Math.round(s / 3600) + 'h';
     return Math.round(s / 86400) + 'd';
   }
-  // Admin endpoints rely on the session cookie set by /api/auth/login -
-  // no Authorization header needed (and nothing sensitive in JS-readable
-  // storage). credentials: 'same-origin' is the default but spelled out
-  // for clarity.
+  // Admin endpoints reuse the HttpOnly session set by menu.php. Nothing
+  // sensitive is kept in JavaScript-readable storage.
   function adminApi(url) {
-    return fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+    return adminFetch(url, { credentials: 'same-origin', cache: 'no-store' });
   }
   function openAdmin(section) {
+    if (section === 'educators' && !educatorsAvailable) {
+      pendingAdminSection = null;
+      closeAdmin();
+      return;
+    }
+    if (adminAccessState !== 'unlocked') {
+      pendingAdminSection = section;
+      if (adminAccessState === 'locked') {
+        showAdminLocked('', false);
+      }
+      return;
+    }
+    if (adminSect === 'settings' && section !== 'settings') {
+      discardPendingSettings();
+      if (settingsInfoCleanup) settingsInfoCleanup();
+      if (settingsAccessCleanup) settingsAccessCleanup();
+    }
+    if (adminSect === 'educators' && section !== 'educators') {
+      if (typeof stopEducatorCountObservation === 'function') {
+        stopEducatorCountObservation({ invalidate: true });
+      }
+      closeEducatorTransientUi();
+      liveAudioController.unmount();
+      if (educatorElapsedTimer) { clearInterval(educatorElapsedTimer); educatorElapsedTimer = null; }
+      educatorEditing = null;
+      educatorPendingState = null;
+      educatorStartDraft = '';
+      educatorFolderDraft = '';
+      educatorFolderComposerOpen = false;
+      educatorLiveWide = false;
+    }
+    adminViewGeneration += 1;
     document.body.classList.add('admin-on');
+    adminEl.inert = false;
+    adminEl.removeAttribute('inert');
     adminEl.setAttribute('aria-hidden', 'false');
     adminTitle.textContent = ADMIN_TITLES[section] || section;
     if (adminPollT) { clearInterval(adminPollT); adminPollT = null; }
+    if (adminSect !== section) adminEl.scrollTop = 0;
     adminSect = section;
+    adminEl.setAttribute('data-admin-section', section);
+    syncAdminTitlePin();
     if (section === 'settings') renderAdminSettings();
     else if (section === 'system') renderAdminSystem();
     else if (section === 'logs') renderAdminLogs();
     else if (section === 'tools') renderAdminTools();
+    else if (section === 'educators') renderAdminEducators();
+    else adminBody.innerHTML = adminUnreachableHtml('unknown admin section');
+    if (section === 'educators' && educatorAdminRouteFocus) {
+      educatorAdminRouteFocus = false;
+      adminTitle.setAttribute('tabindex', '-1');
+      focusEl(adminTitle);
+    }
   }
-  function closeAdmin() {
+  function focusPublicEducatorDestination() {
+    var back = document.getElementById('returnToEducators');
+    var target = back && !back.hidden ? back : staticTitle;
+    if (!target) return false;
+    if (target === staticTitle && target.setAttribute) target.setAttribute('tabindex', '-1');
+    focusEl(target);
+    return true;
+  }
+  function closeAdmin(options) {
+    options = options || {};
+    var wasAdminOn = document.body.classList.contains('admin-on');
+    var previousAdminSect = adminSect;
+    if (previousAdminSect === 'settings') {
+      discardPendingSettings();
+      if (settingsInfoCleanup) settingsInfoCleanup();
+      if (settingsAccessCleanup) settingsAccessCleanup();
+    }
+    if (previousAdminSect === 'educators') {
+      if (typeof stopEducatorCountObservation === 'function') {
+        stopEducatorCountObservation({ invalidate: true });
+      }
+      closeEducatorTransientUi();
+      liveAudioController.unmount();
+      if (educatorElapsedTimer) { clearInterval(educatorElapsedTimer); educatorElapsedTimer = null; }
+      educatorEditing = null;
+      educatorPendingState = null;
+      educatorStartDraft = '';
+      educatorFolderDraft = '';
+      educatorFolderComposerOpen = false;
+      educatorLiveWide = false;
+    }
+    adminViewGeneration += 1;
     document.body.classList.remove('admin-on');
+    if (options.focusPublicEducator) focusPublicEducatorDestination();
     adminEl.setAttribute('aria-hidden', 'true');
+    adminEl.inert = true;
+    adminEl.setAttribute('inert', '');
     if (adminPollT) { clearInterval(adminPollT); adminPollT = null; }
     adminSect = null;
+    adminEl.scrollTop = 0;
+    adminEl.removeAttribute('data-admin-section');
+    syncAdminTitlePin();
+    if (wasAdminOn) queueVisibleAtlasPack();
   }
 
   // One quiet glyph per metric, drawn on the same 24-grid and stroke weight as
@@ -7428,7 +12344,18 @@
     }
     // Responses can land out of order, so only the newest query is allowed to
     // paint. Without the token a slow "San" can overwrite a fast "San Diego".
-    var found = [], searchT, seq = 0;
+    var found = [], searchT, drawT, seq = 0, removed = false;
+    function onResize() { if (!removed) draw(); }
+    function removeHost() {
+      if (removed) return;
+      removed = true;
+      seq += 1;
+      clearTimeout(searchT);
+      clearTimeout(drawT);
+      window.removeEventListener('resize', onResize);
+      host.remove();
+    }
+    host.__avianDismiss = removeHost;
     function run(q) {
       var mine = ++seq;
       note('searching...');
@@ -7469,7 +12396,7 @@
       if (closing) return;
       closing = true;
       host.classList.add('closing');
-      var done = function () { host.remove(); };
+      var done = removeHost;
       var card = host.querySelector('.map-card');
       card.addEventListener('animationend', done, { once: true });
       setTimeout(done, 320);          // never leave it stuck if the animation is off
@@ -7489,22 +12416,443 @@
     // you touch it reads as broken. The timeout catches the case where
     // layout has not settled on the first call.
     draw();
-    setTimeout(draw, 0);
-    window.addEventListener('resize', draw);
+    drawT = setTimeout(onResize, 0);
+    window.addEventListener('resize', onResize);
+  }
+
+  function archiveConfiguredState(state) {
+    return !!(state && state.installed && state.dependencies && state.dependencies.rclone
+      && state.dependencies.sqlite3 && state.remote && state.remote.configured);
+  }
+
+  function archiveSettingsRow(initialState) {
+    var configured = archiveConfiguredState(initialState);
+    var enabled = configured && initialState.timer && initialState.timer.enabled === 'enabled';
+    var remoteName = initialState && initialState.remote && initialState.remote.name || 'gdrive';
+    var archiveDetails = 'Back up completed days to Google Drive. Before first use, run rclone config on the Pi, name the remote '
+      + adminEsc(remoteName) + ', choose drive.file, then return here and use the button beside the command.';
+    return ''
+      + '<div class="archive-settings-control" data-archive-control aria-busy="' + (initialState ? 'false' : 'true') + '">'
+      + '  <div class="menu-row archive-settings-head">'
+      + '    <div class="access-copy"><span class="label">Nightly Drive backup</span>'
+      + settingsInfoMarkup('archiveBackupTip', 'About Nightly Drive backup', archiveDetails)
+      + '    </div>'
+      + '    <div class="archive-settings-head-actions">'
+      + '      <button type="button" class="settings-disclosure" data-archive-disclosure aria-controls="archiveSettingsDetails" aria-expanded="' + (enabled ? 'true' : 'false') + '">details</button>'
+      + '      <button type="button" class="switch" role="switch" data-archive-toggle aria-label="Nightly Drive backup" aria-describedby="archiveBackupTip" aria-checked="' + (enabled ? 'true' : 'false') + '"></button>'
+      + '    </div>'
+      + '  </div>'
+      + '  <div id="archiveSettingsDetails" class="birdweather-details-shell archive-details-shell" data-archive-details-shell'
+      + '    data-open="' + (enabled ? 'true' : 'false') + '" data-settled="' + (enabled ? 'true' : 'false') + '"'
+      + '    aria-hidden="' + (enabled ? 'false' : 'true') + '"' + (enabled ? '' : ' hidden inert') + '>'
+      + '    <div class="archive-settings-details" data-archive-details></div>'
+      + '  </div>'
+      + '</div>';
+  }
+
+  function wireArchiveControl(scope, initialState) {
+    var control = scope.querySelector('[data-archive-control]');
+    if (!control) return;
+    var mainSwitch = control.querySelector('[data-archive-toggle]');
+    var disclosure = control.querySelector('[data-archive-disclosure]');
+    var detailsShell = control.querySelector('[data-archive-details-shell]');
+    var details = control.querySelector('[data-archive-details]');
+    var archiveState = initialState && initialState.ok ? initialState : null;
+    var archiveFailureKind = initialState && initialState.failure_kind || '';
+    var archiveNotice = initialState && initialState.error || '';
+    var archiveNoticeAction = archiveNotice ? 'refresh' : '';
+    var archiveNoticeError = !!archiveNotice;
+    var archiveOpen = !!(archiveState && archiveState.timer && archiveState.timer.enabled === 'enabled');
+    var archiveBusy = false;
+    var archiveBusyAction = '';
+    var archiveSequence = 0;
+    var transitionTimer = 0;
+
+    function archiveApi(action, confirmValue) {
+      var body = { action: action };
+      if (confirmValue) body.confirm = confirmValue;
+      return adminFetch('./avian/api/archive.php', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+        body: JSON.stringify(body),
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (result) {
+          if (!response.ok || !result.ok) throw new Error(result.error || (response.ok ? 'archive controls unavailable' : ('HTTP ' + response.status)));
+          return result;
+        });
+      });
+    }
+
+    function saveArchiveRetention(values) {
+      return adminFetch('./avian/api/config.php', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+        body: JSON.stringify(values),
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (result) {
+          if (!response.ok || !result.ok) throw new Error(result.error || 'could not save recording retention');
+          return result;
+        });
+      });
+    }
+
+    function retentionControls(preserve, fullDisk, disabled) {
+      var preserveSwitch = scope.querySelector('.switch[data-key="preserve"]');
+      var fullDiskSeg = scope.querySelector('.seg[data-key="FULL_DISK"]');
+      if (preserveSwitch) {
+        if (typeof preserve === 'boolean') preserveSwitch.setAttribute('aria-checked', preserve ? 'true' : 'false');
+        preserveSwitch.disabled = !!disabled;
+      }
+      if (fullDiskSeg) {
+        if (fullDisk) {
+          fullDiskSeg.querySelectorAll('button').forEach(function (button) {
+            button.setAttribute('aria-current', button.dataset.v === fullDisk ? 'true' : 'false');
+          });
+          syncPill(fullDiskSeg);
+        }
+        fullDiskSeg.querySelectorAll('button').forEach(function (button) { button.disabled = !!disabled; });
+      }
+    }
+
+    function prepareArchiveRetention() {
+      return flushPendingSettings().then(function (saved) {
+        if (!saved) throw new Error('could not finish saving current settings');
+        return adminFetch('./avian/api/config.php', { credentials: 'same-origin', cache: 'no-store' });
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (result) {
+          if (!response.ok) throw new Error(result.error || 'could not read recording retention');
+          var previous = {
+            MAX_FILES_SPECIES: result.values && Number.isFinite(+result.values.MAX_FILES_SPECIES)
+              ? +result.values.MAX_FILES_SPECIES : 0,
+            FULL_DISK: result.values && result.values.FULL_DISK || 'purge',
+          };
+          return saveArchiveRetention({ preserve: true, FULL_DISK: 'keep' }).then(function () {
+            delete pending.preserve;
+            delete pending.FULL_DISK;
+            retentionControls(true, 'keep', true);
+            return previous;
+          });
+        });
+      });
+    }
+
+    function archiveCode(command) {
+      return '<div class="code" role="button" tabindex="0" title="click to copy" aria-label="copy command">'
+        + '<span class="copy" aria-hidden="true">' + ICON_COPY + '</span>'
+        + '<pre>' + adminEsc(command) + '</pre>'
+        + '</div>';
+    }
+
+    function archiveToggle(label, on, action, disabled, disabledTitle) {
+      return '<div class="archive-control-row">'
+        + '<span class="archive-label">' + adminEsc(label) + '</span>'
+        + '<button type="button" class="switch" role="switch" aria-label="' + adminEsc(label) + '"'
+        + ' aria-checked="' + (on ? 'true' : 'false') + '" data-archive-action="' + action + '"'
+        + (disabled && disabledTitle ? ' title="' + adminAttr(disabledTitle) + '"' : '')
+        + (disabled ? ' disabled' : '') + '></button>'
+        + '</div>';
+    }
+
+    function archiveActionRow(button, action) {
+      return '<div class="archive-action-row">' + button
+        + (archiveNotice && archiveNoticeAction === action
+          ? '<span class="archive-inline-state' + (archiveNoticeError ? ' is-error' : '') + '">' + adminEsc(archiveNotice) + '</span>'
+          : '')
+        + '</div>';
+    }
+
+    function archiveDetail(state) {
+      var configured = archiveConfiguredState(state);
+      if (!configured && !archiveOpen) return '';
+      var inner = '<div class="archive-detail' + (configured ? ' is-controls' : '') + '">';
+      if (!state) {
+        if (archiveFailureKind === 'helper') {
+          inner += '<p>Refresh the archive helper after updating.</p>'
+            + archiveCode('cd ~/BirdNET-Pi && ./scripts/install_services.sh')
+            + (archiveNotice ? '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>' : '');
+        } else {
+          inner += '<p>Could not reach this station.</p>'
+            + archiveActionRow('<button type="button" class="archive-button quiet" data-archive-action="refresh">try again</button>', 'network-retry')
+            + (archiveNotice ? '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>' : '');
+        }
+      } else if (!state.dependencies || !state.dependencies.rclone || !state.dependencies.sqlite3) {
+        inner += '<p>Install rclone and sqlite3.</p>'
+          + archiveCode('sudo apt install rclone sqlite3')
+          + archiveActionRow('<button type="button" class="archive-button quiet" data-archive-action="refresh"'
+            + (archiveBusy ? ' disabled' : '') + '>check again</button>', 'refresh');
+      } else if (!state.remote || !state.remote.configured) {
+        var setupAction = state.installed ? 'refresh' : 'install';
+        var setupLabel = state.installed ? 'check again'
+          : (archiveBusyAction === 'install' ? 'setting up...' : 'set up archive');
+        inner += '<div class="archive-setup-row">'
+          + '<div class="archive-setup-command">'
+          + archiveCode('rclone config')
+          + '</div>'
+          + '<button type="button" class="archive-setup-button" data-archive-action="' + setupAction + '"'
+          + (archiveBusy ? ' disabled' : '') + '>' + setupLabel + '</button>'
+          + (archiveNotice && archiveNoticeAction === setupAction
+            ? '<span class="archive-inline-state' + (archiveNoticeError ? ' is-error' : '') + '">' + adminEsc(archiveNotice) + '</span>'
+            : '')
+          + '</div>';
+      } else if (!state.installed) {
+        inner += '<div class="archive-setup-row is-action-only">'
+          + '<button type="button" class="archive-setup-button" data-archive-action="install"'
+          + (archiveBusy ? ' disabled' : '') + '>'
+          + (archiveBusyAction === 'install' ? 'setting up...' : 'set up archive') + '</button>'
+          + (archiveNotice && archiveNoticeAction === 'install'
+            ? '<span class="archive-inline-state' + (archiveNoticeError ? ' is-error' : '') + '">' + adminEsc(archiveNotice) + '</span>'
+            : '')
+          + '</div>';
+      } else {
+        var enabled = state.timer && state.timer.enabled === 'enabled';
+        var running = state.service && (state.service.active === 'active' || state.service.active === 'activating');
+        inner += '<div class="archive-run-row">'
+          + '<button type="button" class="archive-button quiet archive-run-button" data-archive-action="run"'
+          + (running || archiveBusy ? ' disabled' : '') + '>' + (running ? 'running...' : 'run now') + '</button>'
+          + '</div>';
+        var canPurge = state.last && state.last.state === 'OK' && state.last.verified_files > 0;
+        if (enabled) {
+          inner += archiveToggle('Clear verified local files', !!state.purge,
+            state.purge ? 'purge-off' : 'purge-on', archiveBusy || running || !canPurge,
+            'Run the archive once before enabling local cleanup.');
+        }
+        if (archiveNoticeError) inner += '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>';
+      }
+      return inner + '</div>';
+    }
+
+    function detailsAreOpen() {
+      return detailsShell.getAttribute('data-open') === 'true';
+    }
+    function finishOpen() {
+      if (detailsAreOpen()) detailsShell.setAttribute('data-settled', 'true');
+    }
+    function finishClose() {
+      if (detailsAreOpen()) return;
+      detailsShell.hidden = true;
+      detailsShell.setAttribute('data-settled', 'false');
+    }
+    function openDetails(open) {
+      clearTimeout(transitionTimer);
+      archiveOpen = open;
+      detailsShell.setAttribute('data-settled', 'false');
+      if (open) {
+        detailsShell.hidden = false;
+        detailsShell.inert = false;
+        detailsShell.setAttribute('aria-hidden', 'false');
+        void detailsShell.offsetHeight;
+        detailsShell.setAttribute('data-open', 'true');
+        transitionTimer = setTimeout(finishOpen, 230);
+      } else {
+        detailsShell.setAttribute('data-open', 'false');
+        detailsShell.setAttribute('aria-hidden', 'true');
+        detailsShell.inert = true;
+        transitionTimer = setTimeout(finishClose, 180);
+      }
+      disclosure.setAttribute('aria-expanded', open ? 'true' : 'false');
+      paintArchive();
+    }
+
+    detailsShell.addEventListener('transitionend', function (event) {
+      if (event.target !== detailsShell || event.propertyName !== 'grid-template-rows') return;
+      clearTimeout(transitionTimer);
+      if (detailsAreOpen()) finishOpen();
+      else finishClose();
+    });
+
+    function paintArchive() {
+      var configured = archiveConfiguredState(archiveState);
+      var enabled = configured && archiveState.timer && archiveState.timer.enabled === 'enabled';
+      control.setAttribute('aria-busy', archiveBusy ? 'true' : 'false');
+      mainSwitch.disabled = archiveBusy;
+      mainSwitch.setAttribute('aria-checked', enabled ? 'true' : 'false');
+      details.innerHTML = archiveDetail(archiveState);
+      retentionControls(null, null, archiveBusy || enabled);
+    }
+
+    function loadArchiveStatus() {
+      var request = ++archiveSequence;
+      return adminFetch('./avian/api/archive.php', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (result) {
+            if (request !== archiveSequence) return;
+            if (!response.ok || !result.ok) {
+              var error = new Error(result.error || (response.ok ? 'archive controls unavailable' : ('HTTP ' + response.status)));
+              error.archiveKind = response.status === 503 && result.hint ? 'helper' : 'request';
+              throw error;
+            }
+            archiveState = result;
+            archiveFailureKind = '';
+            if (archiveNoticeAction === 'run' && archiveNotice === 'started'
+              && (!result.service || (result.service.active !== 'active' && result.service.active !== 'activating'))
+              && result.last && result.last.state !== 'never') {
+              archiveNotice = '';
+              archiveNoticeAction = '';
+            }
+            paintArchive();
+          });
+        }).catch(function (error) {
+          if (request !== archiveSequence || adminAuthCancelled(error)) return;
+          archiveState = null;
+          archiveFailureKind = error.archiveKind || 'network';
+          archiveNoticeAction = 'refresh';
+          archiveNotice = error.message || 'archive controls unavailable';
+          archiveNoticeError = true;
+          paintArchive();
+        });
+    }
+
+    function performArchiveAction(action) {
+      if (archiveBusy) return;
+      if (action === 'purge-on'
+        && !confirm('Clear local recordings only after each file is copied and checksum-verified? Today always stays on this Pi.')) return;
+      archiveBusy = true;
+      archiveBusyAction = action;
+      archiveNoticeAction = action;
+      archiveNoticeError = false;
+      archiveNotice = action === 'run' ? 'starting...'
+        : action === 'install' ? 'installing...'
+          : action === 'enable' ? 'enabling...'
+            : action === 'disable' ? 'disabling...'
+              : 'saving...';
+      paintArchive();
+      var prepared = action === 'enable' || action === 'run';
+      var timerWasEnabled = !!(archiveState && archiveState.timer && archiveState.timer.enabled === 'enabled');
+      var previousRetention = null;
+      var work = prepared
+        ? prepareArchiveRetention().then(function (previous) {
+          previousRetention = previous;
+          return archiveApi(action);
+        }).catch(function (error) {
+          if (!previousRetention || (action === 'run' && timerWasEnabled)) throw error;
+          return saveArchiveRetention(previousRetention).then(function () {
+            retentionControls(previousRetention.MAX_FILES_SPECIES >= 10000, previousRetention.FULL_DISK, false);
+            throw error;
+          });
+        })
+        : archiveApi(action, action === 'purge-on' ? 'verified-local-files' : '');
+      work.then(function (result) {
+        archiveState = result;
+        archiveNotice = action === 'run' ? 'started'
+          : action === 'install' ? 'installed'
+            : action === 'enable' ? 'enabled'
+              : action === 'disable' ? 'disabled' : 'saved';
+        archiveNoticeError = false;
+        if (action === 'enable' || action === 'install' || action === 'run') archiveOpen = true;
+        if (action === 'disable') archiveOpen = false;
+      }).catch(function (error) {
+        if (adminAuthCancelled(error)) return;
+        archiveNotice = error.message || 'archive action failed';
+        archiveNoticeError = true;
+      }).then(function () {
+        archiveBusy = false;
+        archiveBusyAction = '';
+        if (archiveOpen !== detailsAreOpen()) openDetails(archiveOpen);
+        else paintArchive();
+        return loadArchiveStatus();
+      });
+    }
+
+    function copyArchiveCode(box) {
+      var pre = box && box.querySelector('pre');
+      var tag = box && box.querySelector('.copy');
+      if (!pre || !tag) return;
+      adminCopyText(pre.textContent).then(function () {
+        tag.innerHTML = ICON_CHECK;
+        box.setAttribute('data-copied', '1');
+        setTimeout(function () { tag.innerHTML = ICON_COPY; box.removeAttribute('data-copied'); }, 1400);
+      }).catch(function () { box.setAttribute('data-copy-error', '1'); });
+    }
+
+    disclosure.addEventListener('click', function () { openDetails(!detailsAreOpen()); });
+    mainSwitch.addEventListener('click', function () {
+      if (archiveBusy) return;
+      if (!archiveConfiguredState(archiveState)) {
+        openDetails(true);
+        return;
+      }
+      var enabled = archiveState.timer && archiveState.timer.enabled === 'enabled';
+      if (!enabled) openDetails(true);
+      performArchiveAction(enabled ? 'disable' : 'enable');
+    });
+    control.addEventListener('click', function (event) {
+      var code = event.target.closest('.code');
+      if (code) { copyArchiveCode(code); return; }
+      var button = event.target.closest('[data-archive-action]');
+      if (!button || button.disabled) return;
+      var action = button.dataset.archiveAction;
+      if (action === 'refresh') {
+        archiveBusy = true;
+        archiveBusyAction = 'refresh';
+        archiveNoticeAction = 'refresh';
+        archiveNotice = 'checking...';
+        archiveNoticeError = false;
+        paintArchive();
+        loadArchiveStatus().then(function () {
+          archiveBusy = false;
+          archiveBusyAction = '';
+          if (archiveState) archiveNotice = '';
+          paintArchive();
+        });
+        return;
+      }
+      performArchiveAction(action);
+    });
+    control.addEventListener('keydown', function (event) {
+      var code = event.target.closest('.code');
+      if (code && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        copyArchiveCode(code);
+      }
+    });
+
+    paintArchive();
+    adminPollT = setInterval(loadArchiveStatus, 10000);
   }
 
   function renderAdminSettings() {
+    if (settingsInfoCleanup) settingsInfoCleanup();
+    if (settingsAccessCleanup) settingsAccessCleanup();
     adminBody.innerHTML = '<p style="font:11px ui-monospace,monospace;color:var(--ink-soft);text-align:center">loading settings...</p>';
     Promise.all([
-      fetch('./avian/api/config.php', { credentials: 'same-origin', cache: 'no-store' })
+      adminFetch('./avian/api/config.php', { credentials: 'same-origin', cache: 'no-store' })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); }),
-      fetchJson('./avian/api/generate.php?action=status').catch(function () { return null; }),
+      adminJson('./avian/api/generate.php?action=status').catch(function (error) {
+        if (adminAuthCancelled(error)) throw error;
+        return null;
+      }),
+      adminFetch('./avian/api/birdweather.php', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            return r.ok && body.ok ? body : { ok: false };
+          });
+        }).catch(function (error) {
+          if (adminAuthCancelled(error)) throw error;
+          return { ok: false };
+        }),
+      adminFetch('./avian/api/archive.php', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (body) {
+            if (response.ok && body.ok) return body;
+            return {
+              ok: false,
+              error: body.error || 'archive controls unavailable',
+              failure_kind: response.status === 503 && body.hint ? 'helper' : 'request',
+            };
+          });
+        }).catch(function (error) {
+          if (adminAuthCancelled(error)) throw error;
+          return { ok: false, error: 'archive controls unavailable', failure_kind: 'network' };
+        }),
     ])
       .then(function (parts) {
         var cfg = parts[0];
         var gen = parts[1] || {};
+        var birdweather = parts[2] || { ok: false };
+        var archive = parts[3] || { ok: false, failure_kind: 'network' };
         var v = cfg.values || {};
         var sec = cfg.secrets || {};
+        var security = cfg.security || {};
         var preserve = cfg.preserve;
         // Instant chroma cutouts awaiting the full-quality workstation
         // pass: surface the count and a ready-to-paste command. The
@@ -7529,16 +12877,22 @@
           + themeRow()
           + labelsRow()
           + atlasAlwaysAllRow()
+          + atlasClassicRow()
+          + settingsText('SITE_NAME', 'Station name', v.SITE_NAME || 'BirdNET-Pi', 60)
           + '</section><section>'
           + settingsSlider('CONFIDENCE', 'Confidence threshold', 'min score to log a detection', v.CONFIDENCE, 0.1, 0.95, 0.05, 2, 0.7)
           + settingsSlider('SF_THRESH', 'Range filter', 'min likelihood a species is here this week', v.SF_THRESH, 0.001, 0.5, 0.001, 3, 0.03)
           + settingsSlider('SENSITIVITY', 'Sensitivity', 'sigmoid slope on the classifier output', v.SENSITIVITY, 0.5, 1.5, 0.05, 2, 1.25)
           + settingsSlider('OVERLAP', 'Chunk overlap', 'seconds re-analyzed per pass', v.OVERLAP, 0, 2.5, 0.1, 1, 0.0)
+          + settingsToggle('RESET_AT_MIDNIGHT', 'Reset at midnight', 'keep time windows inside the current day', !!v.RESET_AT_MIDNIGHT)
           + '</section><section>'
           + stationRow(v)
           + settingsSecret('GEMINI_API_KEY', 'Gemini API key', 'for drawing birds on demand', sec.GEMINI_API_KEY)
           + settingsSecret('EBIRD_API_KEY', 'eBird API key', 'for regional species filters', sec.EBIRD_API_KEY)
-          + '</section><section>'
+          + '</section><section class="settings-retention">'
+          + lanAuthRow(security)
+          + birdweatherRow(birdweather)
+          + archiveSettingsRow(archive)
           + settingsToggle('preserve', 'Preserve all recordings', "don't auto-delete", preserve)
           + settingsSegmented('FULL_DISK', 'When disk fills', '', v.FULL_DISK, [
             { v: 'keep', label: 'keep' },
@@ -7568,6 +12922,20 @@
           });
         });
         wireSettingsControls(adminBody);
+        wireLanAuthControl(adminBody, security);
+        wirePasswordChange(adminBody);
+        wireSettingsAccessDismissal(adminBody);
+        wireBirdweatherControl(adminBody, birdweather);
+        wireArchiveControl(adminBody, archive);
+        wireSettingsInfo(adminBody);
+        if (pendingAdminNotice) {
+          var noticeTarget = adminBody.querySelector('[data-lan-auth-status]');
+          if (noticeTarget) {
+            noticeTarget.textContent = pendingAdminNotice.message;
+            noticeTarget.classList.toggle('err', !!pendingAdminNotice.error);
+            pendingAdminNotice = null;
+          }
+        }
         adminBody.querySelectorAll('.seg').forEach(wireToggleAdvance);   // open-space advance
         // Slide each pill onto its current option (fonts settle first,
         // otherwise the measured button width is the fallback face's).
@@ -7588,43 +12956,36 @@
             x.setAttribute('aria-current', x === b ? 'true' : 'false');
           });
         });
-        // Labels switcher applies + persists immediately too. The second
-        // render after the handwriting face loads swaps the measured
-        // fallback metrics for the real ones.
-        var labelsSeg = adminBody.querySelector('[data-labels-seg]');
-        if (labelsSeg) labelsSeg.addEventListener('click', function (ev) {
-          var b = ev.target.closest('button[data-labels]');
-          if (!b) return;
-          writeLS('bird:labels', b.getAttribute('data-labels'));
-          [].forEach.call(labelsSeg.querySelectorAll('button'), function (x) {
-            x.setAttribute('aria-current', x === b ? 'true' : 'false');
-          });
-          if (document.fonts && document.fonts.load) {
-            document.fonts.load('600 16px Hand').then(function () {
-              labelFontReady = true; renderCollageFromData();
-            }).catch(function () { labelFontReady = true; renderCollageFromData(); });
-          } else {
-            labelFontReady = true; renderCollageFromData();
-          }
-        });
+        // Bird names apply and persist immediately without entering the Pi
+        // settings queue. Loading the handwriting face triggers the second
+        // render with its final measured metrics.
+        wireLabelsPreference(adminBody);
         // Atlas-only preference: apply immediately without touching the
         // shared time picker or sending a station settings request.
         var atlasAllSwitch = adminBody.querySelector('[data-atlas-always-all]');
         if (atlasAllSwitch) atlasAllSwitch.addEventListener('click', function () {
           applyAtlasAlwaysAll(atlasAllSwitch.getAttribute('aria-checked') !== 'true');
         });
+        var atlasClassicSwitch = adminBody.querySelector('[data-atlas-classic]');
+        if (atlasClassicSwitch) atlasClassicSwitch.addEventListener('click', function () {
+          applyAtlasStyle(atlasClassicSwitch.getAttribute('aria-checked') !== 'true');
+        });
       })
       .catch(function (err) {
+        if (adminAuthCancelled(err)) return;
         adminBody.innerHTML = adminUnreachableHtml('settings load failed (' + err + ')');
       });
   }
 
   function renderAdminSystem() {
     adminBody.innerHTML = '<p style="font:11px ui-monospace,monospace;color:var(--ink-soft);text-align:center">loading...</p>';
+    var sequence = 0;
     function tick() {
+      var request = ++sequence;
       adminApi('./avian/api/birdnet-status.php?action=diag')
         .then(function (r) { return r.text().then(function (raw) { return { status: r.status, raw: raw }; }); })
         .then(function (res) {
+          if (request !== sequence) return;
           var j = null;
           try { j = JSON.parse(res.raw); } catch (e) { }
           if (res.status !== 200 || !j) {
@@ -7636,7 +12997,11 @@
           adminBody.innerHTML = adminSystemMarkup(j);
           wireAdminRestarts();
         })
-        .catch(function (e) { adminBody.innerHTML = adminUnreachableHtml(e.message); });
+        .catch(function (e) {
+          if (request !== sequence) return;
+          if (adminAuthCancelled(e)) return;
+          adminBody.innerHTML = adminUnreachableHtml(e.message);
+        });
     }
     tick();
     adminPollT = setInterval(tick, 6000);
@@ -7694,7 +13059,9 @@
         + '<td><span class="pill ' + pill + '">' + adminEsc(s.active) + '</span></td>'
         + '<td>' + adminEsc(s.enabled) + '</td>'
         + '<td>' + adminEsc(s.since || '-') + '</td>'
-        + '<td><button class="restart" data-unit="' + adminEsc(name) + '">restart</button></td>'
+        + '<td>' + (s.restartable
+          ? '<button class="restart" data-unit="' + adminEsc(name) + '">restart</button>'
+          : '<span class="muted">status only</span>') + '</td>'
         + '</tr>';
     });
     html += '</tbody></table>';
@@ -7721,8 +13088,10 @@
       b.addEventListener('click', function () {
         var unit = b.dataset.unit;
         if (!confirm('Restart ' + unit + '?')) return;
+        var requestView = adminViewGeneration;
+        var requestSection = adminSect;
         b.disabled = true; var old = b.textContent; b.textContent = '...';
-        fetch('./avian/api/birdnet-status.php?action=restart&unit=' + encodeURIComponent(unit), {
+        adminFetch('./avian/api/birdnet-status.php?action=restart&unit=' + encodeURIComponent(unit), {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
           body: '{}',
@@ -7730,15 +13099,28 @@
           .then(function (r) { return r.json(); })
           .then(function (j) {
             b.textContent = j.ok ? 'ok' : 'fail';
-            setTimeout(function () { b.disabled = false; b.textContent = old; renderAdminSystem(); }, 1200);
+            setTimeout(function () {
+              if (requestView !== adminViewGeneration
+                || requestSection !== adminSect
+                || requestSection !== 'system') return;
+              b.disabled = false;
+              b.textContent = old;
+              renderAdminSystem();
+            }, 1200);
           })
-          .catch(function () { b.textContent = 'err'; b.disabled = false; setTimeout(function () { b.textContent = old; }, 1500); });
+          .catch(function (error) {
+            if (adminAuthCancelled(error)) return;
+            b.textContent = 'err';
+            b.disabled = false;
+            setTimeout(function () { b.textContent = old; }, 1500);
+          });
       });
     });
   }
 
   function renderAdminLogs() {
     var unit = 'birdnet_recording', lines = 120, autoScroll = true;
+    var sequence = 0;
     adminBody.innerHTML =
       '<div class="admin-logs-toolbar">'
       + '  <label>unit</label><select id="adminLogsUnit">'
@@ -7761,9 +13143,11 @@
       autoScroll = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 20;
     });
     function tick() {
+      var request = ++sequence;
       adminApi('./avian/api/birdnet-status.php?action=logs&unit=' + encodeURIComponent(unit) + '&lines=' + lines)
         .then(function (r) { return r.text().then(function (raw) { return { status: r.status, raw: raw }; }); })
         .then(function (res) {
+          if (request !== sequence) return;
           var j = null;
           try { j = JSON.parse(res.raw); } catch (e) { }
           if (res.status !== 200 || !j) {
@@ -7772,6 +13156,10 @@
           }
           pane.textContent = sudoBlocked(j.text) ? SUDO_HINT : (j.text || '(empty)');
           if (autoScroll) pane.scrollTop = pane.scrollHeight;
+        }).catch(function (error) {
+          if (request !== sequence) return;
+          if (adminAuthCancelled(error)) return;
+          pane.textContent = 'pi unreachable - ' + (error.message || 'no data');
         });
     }
     tick();
@@ -7791,6 +13179,43 @@
   function toolIcon(unit) {
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
       + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + TOOL_ICONS[unit] + '</svg>';
+  }
+  function educatorExportSnapshot(scope) {
+    var edu = educatorRequestScopeId();
+    return {
+      scope: scope === 'recordings' ? 'recordings' : 'detections',
+      edu: validEducatorScopeKey(edu) ? edu : '',
+      generation: educatorScopeGeneration,
+    };
+  }
+  function educatorExportUrl(snapshot, grant) {
+    var url = './avian/api/export.php?what=' + encodeURIComponent(snapshot.scope);
+    if (snapshot.edu) url += '&edu=' + encodeURIComponent(snapshot.edu);
+    if (grant) url += '&grant=' + encodeURIComponent(grant);
+    return url;
+  }
+  function educatorExportGrantBody(snapshot) {
+    var body = { scope: snapshot.scope };
+    if (snapshot.edu) body.edu = snapshot.edu;
+    return body;
+  }
+  function educatorExportSnapshotCurrent(snapshot) {
+    var current = educatorExportSnapshot(snapshot && snapshot.scope);
+    return !!snapshot && current.scope === snapshot.scope && current.edu === snapshot.edu
+      && current.generation === snapshot.generation;
+  }
+  function educatorSavedExportNeedsDirect(snapshot) {
+    return !!snapshot && validEducatorId(snapshot.edu) && adminAuthMeta.direct_local !== true;
+  }
+  function educatorSavedExportMessage() {
+    return 'Saved-view exports require a direct local connection.';
+  }
+  function setAdminExportStatus(link, message, error) {
+    if (!link) return;
+    var status = link.querySelector('[data-export-status]');
+    if (status) status.textContent = message || '';
+    if (error) link.setAttribute('data-error', '1');
+    else link.removeAttribute('data-error');
   }
   function renderAdminTools() {
     var actions = [
@@ -7857,314 +13282,80 @@
     html += '<h2 class="admin-section-head">your data</h2>';
     html += '<div class="admin-actions-grid">';
     function dataCard(title, desc, what) {
-      return '<a class="admin-action" href="./avian/api/export.php?what=' + what + '" download>'
+      var snapshot = educatorExportSnapshot(what);
+      var directRequired = educatorSavedExportNeedsDirect(snapshot);
+      return '<a class="admin-action" data-admin-export data-export-scope="' + what + '"'
+        + (directRequired ? ' aria-disabled="true"' : ' href="' + adminAttr(educatorExportUrl(snapshot)) + '" download') + '>'
         + '<span class="run">download</span>'
         + '<h4>' + adminEsc(title) + '</h4>'
         + '<p>' + adminEsc(desc) + '</p>'
+        + '<span class="state out" data-export-status role="status" aria-live="polite">'
+        + (directRequired ? adminEsc(educatorSavedExportMessage()) : '') + '</span>'
         + '</a>';
     }
     html += dataCard('detections', 'every detection as csv: date, species, confidence, file', 'detections');
     html += dataCard('recordings', 'every clip as tar, by date and species. can run to many gb', 'recordings');
-    html += '<div class="admin-action archive-card" id="archiveCard" aria-busy="true">'
-      + '<button type="button" class="run" disabled>checking</button>'
-      + '<h4>Nightly Drive archive</h4>'
-      + '<p>verified nightly copies and daily stats</p>'
-      + '</div>';
     html += '</div>';
     adminBody.innerHTML = html;
-
-    // The archive stays an optional extra, but Tools owns its setup and
-    // day-to-day controls. Google authorization is the only terminal step;
-    // local deletion remains a separate opt-in after one verified safe run.
-    var archiveOpen = false;
-    var archiveBusy = false;
-    var archiveBusyAction = '';
-    var archiveNotice = '';
-    var archiveNoticeAction = '';
-    var archiveNoticeError = false;
-    var archiveFailureKind = '';
-    var archiveState = null;
-    var archiveCard = document.getElementById('archiveCard');
-
-    function archiveApi(action, confirmValue) {
-      var body = { action: action };
-      if (confirmValue) body.confirm = confirmValue;
-      return fetch('./avian/api/archive.php', {
-        method: 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
-        body: JSON.stringify(body),
-      }).then(function (r) {
-        return r.json().catch(function () { return {}; }).then(function (j) {
-          if (!r.ok || !j.ok) throw new Error(j.error || (r.ok ? 'archive controls unavailable' : ('HTTP ' + r.status)));
-          return j;
-        });
-      });
-    }
-
-    function saveArchiveRetention(values) {
-      return fetch('./avian/api/config.php', {
-        method: 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' }, body: JSON.stringify(values),
-      }).then(function (r) {
-        return r.json().catch(function () { return {}; }).then(function (j) {
-          if (!r.ok || !j.ok) throw new Error(j.error || 'could not save recording retention');
-          return j;
-        });
-      });
-    }
-
-    function prepareArchiveRetention() {
-      return fetch('./avian/api/config.php', { credentials: 'same-origin', cache: 'no-store' })
-        .then(function (r) {
-          return r.json().catch(function () { return {}; }).then(function (j) {
-            if (!r.ok) throw new Error(j.error || 'could not read recording retention');
-            var previous = {
-              MAX_FILES_SPECIES: (j.values && Number.isFinite(+j.values.MAX_FILES_SPECIES))
-                ? +j.values.MAX_FILES_SPECIES : 0,
-              FULL_DISK: (j.values && j.values.FULL_DISK) || 'purge',
-            };
-            return saveArchiveRetention({ preserve: true, FULL_DISK: 'keep' })
-              .then(function () { return previous; });
-          });
-        });
-    }
-
-    function archiveCode(command) {
-      return '<div class="code" role="button" tabindex="0" title="click to copy" aria-label="copy command">'
-        + '<span class="copy" aria-hidden="true">' + ICON_COPY + '</span>'
-        + '<pre>' + adminEsc(command) + '</pre>'
-        + '</div>';
-    }
-
-    function archiveToggle(label, on, action, disabled, disabledTitle) {
-      return '<div class="archive-control-row">'
-        + '<span class="archive-label">' + adminEsc(label) + '</span>'
-        + '<button type="button" class="switch" role="switch" aria-label="' + adminEsc(label) + '"'
-        + ' aria-checked="' + (on ? 'true' : 'false') + '" data-archive-action="' + action + '"'
-        + (disabled && disabledTitle ? ' title="' + adminEsc(disabledTitle) + '"' : '')
-        + (disabled ? ' disabled' : '') + '></button>'
-        + '</div>';
-    }
-
-    function archiveActionRow(button, action) {
-      return '<div class="archive-action-row">' + button
-        + (archiveNotice && archiveNoticeAction === action ? '<span class="archive-inline-state' + (archiveNoticeError ? ' is-error' : '') + '">'
-          + adminEsc(archiveNotice) + '</span>' : '')
-        + '</div>';
-    }
-
-    function archiveConfigured(s) {
-      return !!(s && s.installed && s.dependencies && s.dependencies.rclone
-        && s.dependencies.sqlite3 && s.remote && s.remote.configured);
-    }
-
-    function archiveDetail(s) {
-      var configured = archiveConfigured(s);
-      if (!configured && !archiveOpen) return '';
-      var inner = '<div class="archive-detail' + (configured ? ' is-controls' : '') + '">';
-      if (!s) {
-        if (archiveFailureKind === 'helper') {
-          inner += '<p>Refresh the archive helper after updating.</p>'
-            + archiveCode('cd ~/BirdNET-Pi && ./scripts/install_services.sh')
-            + (archiveNotice ? '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>' : '');
-        } else {
-          inner += '<p>Could not reach this station.</p>'
-            + archiveActionRow('<button type="button" class="archive-button quiet" data-archive-action="refresh">try again</button>', 'network-retry')
-            + (archiveNotice ? '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>' : '');
-        }
-      } else if (!s.installed) {
-        inner += '<p>Install the archive service. It stays off until you enable it.</p>'
-          + archiveActionRow('<button type="button" class="archive-button" data-archive-action="install"'
-            + (archiveBusy ? ' disabled' : '') + '>'
-            + (archiveBusyAction === 'install' ? 'installing...' : 'install archive') + '</button>', 'install');
-      } else if (!s.dependencies || !s.dependencies.rclone || !s.dependencies.sqlite3) {
-        inner += '<p>Install rclone and sqlite3.</p>'
-          + archiveCode('sudo apt install rclone sqlite3')
-          + archiveActionRow('<button type="button" class="archive-button quiet" data-archive-action="refresh"'
-            + (archiveBusy ? ' disabled' : '') + '>check again</button>', 'refresh');
-      } else if (!s.remote || !s.remote.configured) {
-        inner += '<p>Connect Google Drive. Name the remote <code>' + adminEsc(s.remote.name || 'gdrive')
-          + '</code> and choose the <code>drive.file</code> scope.</p>'
-          + archiveCode('rclone config')
-          + archiveActionRow('<button type="button" class="archive-button quiet" data-archive-action="refresh"'
-            + (archiveBusy ? ' disabled' : '') + '>check again</button>', 'refresh');
-      } else {
-        var enabled = s.timer && s.timer.enabled === 'enabled';
-        var running = s.service && (s.service.active === 'active' || s.service.active === 'activating');
-        inner += '<div class="archive-run-row">'
-          + '<button type="button" class="run archive-run-button" data-archive-action="run"'
-          + (running || archiveBusy ? ' disabled' : '') + '>' + (running ? 'running...' : 'run now') + '</button>'
-          + '</div>';
-        var canPurge = s.last && s.last.state === 'OK' && s.last.verified_files > 0;
-        if (enabled) {
-          inner += archiveToggle('Clear verified local files', !!s.purge,
-            s.purge ? 'purge-off' : 'purge-on', archiveBusy || running || !canPurge,
-            'Run the archive once before enabling local cleanup.');
-        }
-        if (archiveNoticeError) inner += '<div class="archive-command-error">' + adminEsc(archiveNotice) + '</div>';
-      }
-      return inner + '</div>';
-    }
-
-    function paintArchive() {
-      if (!archiveCard) return;
-      var configured = archiveConfigured(archiveState);
-      var enabled = configured && archiveState.timer && archiveState.timer.enabled === 'enabled';
-      archiveCard.setAttribute('aria-busy', archiveBusy ? 'true' : 'false');
-      archiveCard.classList.toggle('is-open', archiveOpen && !configured);
-      archiveCard.classList.toggle('is-configured', configured);
-      archiveCard.classList.toggle('is-pressable', !configured && !archiveOpen && !archiveBusy);
-      if (!configured && !archiveOpen) {
-        archiveCard.setAttribute('role', 'button');
-        archiveCard.setAttribute('tabindex', '0');
-        archiveCard.setAttribute('aria-expanded', 'false');
-        archiveCard.setAttribute('aria-label', 'Set up Nightly Drive archive');
-      } else {
-        archiveCard.removeAttribute('role');
-        archiveCard.removeAttribute('tabindex');
-        archiveCard.removeAttribute('aria-expanded');
-        archiveCard.removeAttribute('aria-label');
-      }
-      archiveCard.parentElement.classList.toggle('archive-open', archiveOpen && !configured);
-      archiveCard.innerHTML = (configured
-        ? '<button type="button" class="switch archive-schedule" role="switch" aria-label="Nightly Drive archive"'
-          + ' aria-checked="' + (enabled ? 'true' : 'false') + '" data-archive-action="'
-          + (enabled ? 'disable' : 'enable') + '"' + (archiveBusy ? ' disabled' : '') + '></button>'
-        : '<span class="run" aria-hidden="true">set up</span>')
-        + '<h4>Nightly Drive archive</h4>'
-        + '<p>verified nightly copies and daily stats</p>'
-        + archiveDetail(archiveState);
-    }
-
-    function loadArchiveStatus() {
-      return fetch('./avian/api/archive.php', { credentials: 'same-origin', cache: 'no-store' })
-        .then(function (r) {
-          return r.json().catch(function () { return {}; }).then(function (j) {
-            if (!r.ok || !j.ok) {
-              var error = new Error(j.error || (r.ok ? 'archive controls unavailable' : ('HTTP ' + r.status)));
-              error.archiveKind = r.status === 503 && j.hint ? 'helper' : 'request';
-              throw error;
-            }
-            archiveState = j;
-            archiveFailureKind = '';
-            if (archiveNoticeAction === 'run' && archiveNotice === 'started'
-              && (!j.service || (j.service.active !== 'active' && j.service.active !== 'activating'))
-              && j.last && j.last.state !== 'never') {
-              archiveNotice = '';
-              archiveNoticeAction = '';
-            }
-            paintArchive();
-          });
-        })
-        .catch(function (e) {
-          archiveState = null;
-          archiveFailureKind = e.archiveKind || 'network';
-          archiveNoticeAction = 'refresh';
-          archiveNotice = e.message || 'archive controls unavailable';
-          archiveNoticeError = true;
-          paintArchive();
-        });
-    }
-
-    function performArchiveAction(action) {
-      if (archiveBusy) return;
-      if (action === 'purge-on' && !confirm('Clear local recordings only after each file is copied and checksum-verified? Today always stays on this Pi.')) return;
-      archiveBusy = true;
-      archiveBusyAction = action;
-      archiveNoticeAction = action;
-      archiveNoticeError = false;
-      archiveNotice = action === 'run' ? 'starting...'
-        : action === 'install' ? 'installing...'
-          : action === 'enable' ? 'enabling...'
-            : action === 'disable' ? 'disabling...'
-              : 'saving...';
-      paintArchive();
-      var prepared = action === 'enable' || action === 'run';
-      var previousRetention = null;
-      var work = prepared
-        ? prepareArchiveRetention().then(function (previous) {
-          previousRetention = previous;
-          return archiveApi(action);
-        }).catch(function (error) {
-          if (!previousRetention) throw error;
-          return saveArchiveRetention(previousRetention).then(function () { throw error; });
-        })
-        : archiveApi(action, action === 'purge-on' ? 'verified-local-files' : '');
-      work.then(function (j) {
-        archiveState = j;
-        archiveNotice = action === 'run' ? 'started'
-          : action === 'install' ? 'installed'
-            : action === 'enable' ? 'enabled'
-              : action === 'disable' ? 'disabled' : 'saved';
-        archiveNoticeError = false;
-      }).catch(function (e) {
-        archiveNotice = e.message || 'archive action failed';
-        archiveNoticeError = true;
-      }).then(function () {
-        archiveBusy = false;
-        archiveBusyAction = '';
-        return loadArchiveStatus();
-      });
-    }
-
-    function copyArchiveCode(box) {
-      var pre = box && box.querySelector('pre');
-      var tag = box && box.querySelector('.copy');
-      if (!pre || !tag) return;
-      adminCopyText(pre.textContent).then(function () {
-        tag.innerHTML = ICON_CHECK;
-        box.setAttribute('data-copied', '1');
-        setTimeout(function () { tag.innerHTML = ICON_COPY; box.removeAttribute('data-copied'); }, 1400);
-      }).catch(function () { box.setAttribute('data-copy-error', '1'); });
-    }
-
-    if (archiveCard) {
-      archiveCard.addEventListener('click', function (e) {
-        var code = e.target.closest('.code');
-        if (code) { copyArchiveCode(code); return; }
-        var button = e.target.closest('[data-archive-action]');
-        if (!button) {
-          if (!archiveConfigured(archiveState) && !archiveOpen && !archiveBusy) {
-            archiveOpen = true;
-            paintArchive();
-          }
+    adminBody.querySelectorAll('[data-admin-export]').forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        var snapshot = educatorExportSnapshot(link.dataset.exportScope);
+        if (educatorSavedExportNeedsDirect(snapshot)) {
+          event.preventDefault();
+          link.removeAttribute('href');
+          link.removeAttribute('download');
+          link.setAttribute('aria-disabled', 'true');
+          setAdminExportStatus(link, educatorSavedExportMessage(), true);
           return;
         }
-        if (button.disabled) return;
-        var action = button.dataset.archiveAction;
-        if (action === 'refresh') {
-          archiveBusy = true;
-          archiveBusyAction = 'refresh';
-          archiveNoticeAction = 'refresh';
-          archiveNotice = 'checking...';
-          archiveNoticeError = false;
-          paintArchive();
-          loadArchiveStatus().then(function () {
-            archiveBusy = false;
-            archiveBusyAction = '';
-            if (archiveState) archiveNotice = '';
-            paintArchive();
+        link.removeAttribute('aria-disabled');
+        link.href = educatorExportUrl(snapshot);
+        link.setAttribute('download', '');
+        setAdminExportStatus(link, '', false);
+        if (!adminAuthMeta.required) return;
+        event.preventDefault();
+        if (link.getAttribute('aria-busy') === 'true') return;
+        link.setAttribute('aria-busy', 'true');
+        adminFetch('./avian/api/menu.php?action=download-grant', {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
+          body: JSON.stringify(educatorExportGrantBody(snapshot)),
+        })
+          .then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (body) {
+              if (!response.ok || !body.ok || !/^[a-f0-9]{48}$/.test(body.token || '')) {
+                var error = new Error(response.status === 413
+                  ? 'Export is too large. Choose a smaller listening period or folder.'
+                  : 'Download unavailable.');
+                error.status = response.status;
+                throw error;
+              }
+              if (!educatorExportSnapshotCurrent(snapshot)) return;
+              var download = document.createElement('a');
+              download.href = educatorExportUrl(snapshot, body.token);
+              download.download = '';
+              download.hidden = true;
+              document.body.appendChild(download);
+              download.click();
+              download.remove();
+            });
+          }).catch(function (error) {
+            if (adminAuthCancelled(error)) return;
+            if (!educatorExportSnapshotCurrent(snapshot)) return;
+            setAdminExportStatus(link, error && error.status === 413
+              ? 'Export is too large. Choose a smaller listening period or folder.'
+              : 'Download unavailable.', true);
+            setTimeout(function () { link.removeAttribute('data-error'); }, 1800);
+          }).then(function () {
+            link.removeAttribute('aria-busy');
           });
-          return;
-        }
-        performArchiveAction(action);
       });
-      archiveCard.addEventListener('keydown', function (e) {
-        var code = e.target.closest('.code');
-        if (code && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); copyArchiveCode(code); }
-        if (e.target === archiveCard && (e.key === 'Enter' || e.key === ' ')
-          && !archiveConfigured(archiveState) && !archiveOpen && !archiveBusy) {
-          e.preventDefault(); archiveOpen = true; paintArchive();
-        }
-      });
-    }
-    loadArchiveStatus();
-    adminPollT = setInterval(loadArchiveStatus, 10000);
+    });
 
     // Whether a unit is up is the first thing you want off this page, so the
     // badge carries it and the card only has to be hovered to offer the fix.
     function paintStates() {
-      fetchJson('./avian/api/birdnet-status.php?action=services').then(function (j) {
+      adminJson('./avian/api/birdnet-status.php?action=services').then(function (j) {
         var svc = (j && j.services) || {};
         adminBody.querySelectorAll('.tool-card').forEach(function (card) {
           if (card.dataset.busy) return;
@@ -8176,7 +13367,8 @@
           b.dataset.live = live;
           b.querySelector('.now').textContent = live;
         });
-      }).catch(function () {
+      }).catch(function (error) {
+        if (adminAuthCancelled(error)) return;
         adminBody.querySelectorAll('.tool-card .badge').forEach(function (b) {
           b.dataset.live = 'unknown';
           b.querySelector('.now').textContent = 'unknown';
@@ -8196,7 +13388,7 @@
         var out = card.querySelector('.state');
         out.textContent = 'restarting...';
         card.setAttribute('data-state', 'busy');
-        fetch('./avian/api/birdnet-status.php?action=restart&unit=' + encodeURIComponent(unit), {
+        adminFetch('./avian/api/birdnet-status.php?action=restart&unit=' + encodeURIComponent(unit), {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
           body: '{}',
@@ -8214,6 +13406,7 @@
             }, 2600);
           })
           .catch(function (e) {
+            if (adminAuthCancelled(e)) return;
             card.setAttribute('data-state', 'err');
             out.textContent = e.message || 'request failed';
             setTimeout(function () {
@@ -8275,7 +13468,7 @@
       }
     }
     function maintenanceRequest(action) {
-      return fetch('./avian/api/maintenance.php', {
+      return adminFetch('./avian/api/maintenance.php', {
         method: 'POST', credentials: 'same-origin', cache: 'no-store',
         headers: { 'Content-Type': 'application/json', 'X-Avian-Action': '1' },
         body: JSON.stringify({
@@ -8290,13 +13483,15 @@
       });
     }
     function loadMaintenance() {
-      return fetch('./avian/api/maintenance.php', { credentials: 'same-origin', cache: 'no-store' })
+      return adminFetch('./avian/api/maintenance.php', { credentials: 'same-origin', cache: 'no-store' })
         .then(function (response) {
           return response.json().catch(function () { return {}; }).then(function (body) {
             if (!response.ok || !body.ok) throw new Error(body.error || 'maintenance unavailable');
             paintMaintenance(body);
           });
-        }).catch(function () { });
+        }).catch(function (error) {
+          if (!adminAuthCancelled(error) && window.console) console.warn('maintenance status failed', error);
+        });
     }
     adminBody.querySelectorAll('[data-maintenance-action]').forEach(function (button) {
       button.addEventListener('click', function () {
@@ -8313,6 +13508,7 @@
         maintenanceRequest(action).then(function (state) {
           paintMaintenance(state);
         }).catch(function (error) {
+          if (adminAuthCancelled(error)) return;
           button.disabled = false;
           if (card) card.setAttribute('aria-busy', 'false');
           if (out) out.textContent = error.message || 'maintenance unavailable';
@@ -8390,12 +13586,14 @@
 
   // Initial load: if URL has a sci hash, jump to atlas, highlight, and
   // open the modal.
-  if (readHash()) { go(2); highlightAtlas(readHash()); openDetailModal(readHash()); }
-  // Admin overlay routing: #admin=system|logs|tools opens the admin
+  if (readHash() && !educatorScopeBlocked) { go(2); highlightAtlas(readHash()); openDetailModal(readHash()); }
+  // Admin overlay routing accepts only exact native admin section names.
   // screen with that sub-tab. Clearing the hash closes it.
   function readAdminHash() {
-    var m = location.hash.match(/^#admin=([a-z]+)/);
-    return m ? m[1] : null;
+    var m = location.hash.match(/^#admin=([a-z]+)$/);
+    if (!m || !Object.prototype.hasOwnProperty.call(ADMIN_TITLES, m[1])) return null;
+    if (m[1] === 'educators' && !educatorsAvailable) return null;
+    return m[1];
   }
   // #about - brief explainer popup; reached via /about (302 -> /#about)
   // or the masthead eyebrow. aria-hidden drives the CSS fade/slide.
@@ -8408,7 +13606,7 @@
     if (location.hash === '#about') openAbout(); else closeAbout();
     if (adm) { openAdmin(adm); return; }
     closeAdmin();
-    if (sci) { go(2); highlightAtlas(sci); openDetailModal(sci); }
+    if (sci && !educatorScopeBlocked) { go(2); highlightAtlas(sci); openDetailModal(sci); }
     else { highlightAtlas(null); closeDetailModal(); }
   }
   if (readAdminHash()) openAdmin(readAdminHash());
@@ -8693,6 +13891,9 @@
   function ensureSpectroImage(row) {
     var file = row && row.dataset.file;
     if (!file) return;
+    var rowScope = validEducatorScopeKey(row.dataset.edu) ? row.dataset.edu : '';
+    var detection = rowScope ? educatorDetectionId(row.dataset.detection) : null;
+    var mediaCacheKey = (rowScope || 'station') + '|' + (detection || '') + '|' + file;
     var strip = row.querySelector('.rec-spectro');
     if (!strip) return;
     var loadingEl = strip.querySelector('.rec-spectro-loading');
@@ -8794,18 +13995,18 @@
       });
     }
 
-    if (_decodedCache[file]) {
-      paintSpectrogram(canvas, _decodedCache[file]);
+    if (_decodedCache[mediaCacheKey]) {
+      paintSpectrogram(canvas, _decodedCache[mediaCacheKey]);
       done();
       return;
     }
     // Exact stored PNGs remain useful even when WebAudio is unavailable.
     // Audio decoding checks the context only when that path is actually used.
     var ctx = getSpecCtx();
-    decodeRecording('./avian/api/recording.php?file=' + encodeURIComponent(file), file)
+    decodeRecording(mediaApiUrl('recording', { file: file, detection: detection }, rowScope), mediaCacheKey)
       .then(paintDecoded)
       .catch(function () {
-        return paintStoredSpectrogram('./avian/api/spectrogram.php?file=' + encodeURIComponent(file))
+        return paintStoredSpectrogram(mediaApiUrl('spectrogram', { file: file, detection: detection }, rowScope))
           .then(done)
           .catch(function () { fail('recording unavailable'); });
       });
@@ -8830,7 +14031,9 @@
     var sources = [];
     var file = row.dataset.file || '';
     if (file) {
-      sources.push('./avian/api/recording.php?file=' + encodeURIComponent(file));
+      var rowScope = validEducatorScopeKey(row.dataset.edu) ? row.dataset.edu : '';
+      var detection = rowScope ? educatorDetectionId(row.dataset.detection) : null;
+      sources.push(mediaApiUrl('recording', { file: file, detection: detection }, rowScope));
     }
     return sources;
   }
@@ -9095,6 +14298,8 @@
   var activePostcardLanded = null;
   var activePostcardCard = null;
   var activePostcardAnimation = null;
+  var activeClassicPostcardAnimation = null;
+  var activeClassicPostcardSource = null;
   var postcardCloseTimer = 0;
   var postcardDrawerHandle = postcardModal && postcardModal.querySelector('.postcard-drawer-handle');
   var postcardDrawerMedia = window.matchMedia ? window.matchMedia('(max-width: 860px)') : null;
@@ -9187,6 +14392,15 @@
 
   function postcardDrawerSheet() {
     return postcardModal && postcardModal.querySelector('.postcard-sheet');
+  }
+
+  function setPostcardAtlasSource(source) {
+    if (!postcardModal) postcardModal = document.getElementById('postcard-modal');
+    if (!postcardSlot && postcardModal) postcardSlot = postcardModal.querySelector('.postcard-stamp-slot');
+    if (!postcardModal) return;
+    var classic = source === 'classic';
+    postcardModal.setAttribute('data-atlas-source', classic ? 'classic' : 'stamps');
+    if (classic && postcardSlot) postcardSlot.replaceChildren();
   }
 
   function releasePostcardDrawerPointer() {
@@ -9401,6 +14615,84 @@
       });
     });
   }
+  function releaseClassicPostcardMotion() {
+    var animation = activeClassicPostcardAnimation;
+    var source = activeClassicPostcardSource;
+    activeClassicPostcardAnimation = null;
+    activeClassicPostcardSource = null;
+    if (animation) {
+      animation.onfinish = null;
+      animation.oncancel = null;
+      try { animation.cancel(); } catch (err) {}
+    }
+    if (source) source.style.opacity = '';
+    if (postcardModal) postcardModal.classList.remove('is-classic-entering');
+  }
+  function finishClassicPostcardMotion(animation) {
+    if (activeClassicPostcardAnimation !== animation) return;
+    activeClassicPostcardAnimation = null;
+    animation.onfinish = null;
+    animation.oncancel = null;
+    try { animation.cancel(); } catch (err) {}
+    if (postcardModal) postcardModal.classList.remove('is-classic-entering');
+  }
+  function revealClassicPostcardShell(sourceCard, sourceRect, animate) {
+    var sheet = postcardDrawerSheet();
+    var reduced = window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!sheet || !sourceRect || !sourceRect.width || !sourceRect.height) {
+      revealPostcardShell();
+      return;
+    }
+
+    // Keyboard activation and reduced-motion both keep the spatial state
+    // change, but skip the travel. The class disables the sheet's ordinary
+    // entrance transition for the same frame that publishes its final state.
+    if (!animate || reduced) {
+      postcardModal.classList.add('is-classic-entering', 'is-open');
+      postcardModal.classList.remove('is-positioned', 'is-blurring');
+      requestAnimationFrame(function () {
+        if (postcardModal) postcardModal.classList.remove('is-classic-entering');
+      });
+      return;
+    }
+    if (typeof sheet.animate !== 'function') {
+      revealPostcardShell();
+      return;
+    }
+
+    var target = sheet.getBoundingClientRect();
+    if (!target.width || !target.height) {
+      revealPostcardShell();
+      return;
+    }
+    var scaleX = Math.max(.16, Math.min(1, sourceRect.width / target.width));
+    var scaleY = Math.max(.16, Math.min(1, sourceRect.height / target.height));
+    var dx = sourceRect.left + sourceRect.width / 2 - (target.left + target.width / 2);
+    var dy = sourceRect.top + sourceRect.height / 2 - (target.top + target.height / 2);
+    var turn = parseFloat(getComputedStyle(postcardModal).getPropertyValue('--sheet-turn')) || 0;
+    var startTransform = 'translate3d(' + dx.toFixed(1) + 'px,' + dy.toFixed(1)
+      + 'px,0) scale(' + scaleX.toFixed(4) + ',' + scaleY.toFixed(4) + ') rotate(' + turn + 'deg)';
+    var endTransform = 'translate3d(0,0,0) scale(1,1) rotate(' + turn + 'deg)';
+
+    postcardModal.classList.add('is-classic-entering', 'is-open');
+    postcardModal.classList.remove('is-positioned', 'is-blurring');
+    sourceCard.style.opacity = '0';
+    activeClassicPostcardSource = sourceCard;
+    var animation = sheet.animate([
+      { transform: startTransform, opacity: .74, offset: 0 },
+      { transform: endTransform, opacity: 1, offset: 1 }
+    ], {
+      duration: 260,
+      easing: 'cubic-bezier(.23,1,.32,1)',
+      fill: 'both'
+    });
+    activeClassicPostcardAnimation = animation;
+    animation.onfinish = function () { finishClassicPostcardMotion(animation); };
+    animation.oncancel = function () {
+      if (activeClassicPostcardAnimation === animation) releaseClassicPostcardMotion();
+    };
+  }
   function releasePostcardFlight() {
     if (activePostcardAnimation) {
       activePostcardAnimation.onfinish = null;
@@ -9416,6 +14708,65 @@
     activePostcardLanded = null;
     activePostcardCard = null;
   }
+  function scrubPrivateEducatorPostcard() {
+    if (!validEducatorId(activePostcardEducatorScope)) return false;
+    POSTCARD_IMAGE_REQUEST += 1;
+    POSTCARD_CONTENT_REQUEST += 1;
+    stopModalAudio();
+    if (!Number.isFinite(postcardShellSequence)) postcardShellSequence = 0;
+    postcardShellSequence += 1;
+    clearTimeout(postcardCloseTimer);
+    postcardCloseTimer = 0;
+    resetPostcardDrawer();
+    releasePostcardFlight();
+    releaseClassicPostcardMotion();
+    settlePostcardPanels('about');
+    if (!postcardModal) postcardModal = document.getElementById('postcard-modal');
+    if (!postcardSlot && postcardModal) postcardSlot = postcardModal.querySelector('.postcard-stamp-slot');
+    if (postcardModal) {
+      postcardModal.classList.remove(
+        'is-open', 'is-positioned', 'is-blurring', 'is-drawer-dragging',
+        'is-drawer-closing', 'is-classic-entering'
+      );
+      postcardModal.setAttribute('aria-hidden', 'true');
+    }
+    document.body.classList.remove('postcard-open');
+    if (postcardSlot) postcardSlot.replaceChildren();
+    ['modalCommon', 'modalSci', 'modalRecCount'].forEach(function (id) {
+      var node = document.getElementById(id);
+      if (node) node.textContent = '';
+    });
+    ['modalAllTime', 'modalFirstSeen', 'modalFamily', 'modalGenus', 'modalSpecies', 'modalRarity'].forEach(function (id) {
+      var node = document.getElementById(id);
+      if (node) node.textContent = '-';
+    });
+    var desc = document.getElementById('modalDesc');
+    if (desc) {
+      desc.textContent = '';
+      desc.classList.add('placeholder');
+    }
+    var distinctive = document.querySelector('.postcard-about .about-distinctive');
+    if (distinctive) distinctive.remove();
+    var recordings = document.getElementById('modalRecordings');
+    if (recordings) recordings.replaceChildren();
+    var image = document.getElementById('modalImg');
+    if (image) {
+      image.removeAttribute('src');
+      image.removeAttribute('data-sci');
+      image.alt = '';
+      image.classList.remove('is-loading');
+    }
+    ['modalWiki', 'modalEbird'].forEach(function (id) {
+      var link = document.getElementById(id);
+      if (link) link.removeAttribute('href');
+    });
+    var generate = document.getElementById('modalGenerate');
+    if (generate) generate.hidden = true;
+    clearSciHash();
+    activePostcardSci = '';
+    activePostcardEducatorScope = '';
+    return true;
+  }
   function closePostcard() {
     if (!postcardModal || postcardModal.getAttribute('aria-hidden') === 'true') return;
     var drawerSheet = postcardDrawerSheet();
@@ -9427,6 +14778,7 @@
     // sheet closes. While open, one node owns the complete visual state, so
     // there is no delayed shadow/rotation snap at the end of the flight.
     releasePostcardFlight();
+    releaseClassicPostcardMotion();
     settlePostcardPanels(postcardPanelTarget);
     postcardModal.classList.remove('is-positioned');
     requestAnimationFrame(function () {
@@ -9440,23 +14792,59 @@
     postcardCloseTimer = setTimeout(function () {
       postcardCloseTimer = 0;
       postcardModal.setAttribute('aria-hidden', 'true');
+      activePostcardEducatorScope = '';
       if (postcardSlot) postcardSlot.innerHTML = '';
       resetPostcardDrawer();
     }, 340);
   }
-  function openPostcard(card, options) {
+  function openClassicPostcard(card, options) {
     if (!postcardModal) postcardModal = document.getElementById('postcard-modal');
     if (!postcardSlot && postcardModal) postcardSlot = postcardModal.querySelector('.postcard-stamp-slot');
     if (!postcardModal || !postcardSlot || !card) return jumpToSci(card && card.dataset.sci);
+    if (!privateEducatorCardCurrent(card)) { clearSciHash(); return false; }
     options = options || {};
     if (!options.preserveHash) clearSciHash();
     clearTimeout(postcardCloseTimer);
     postcardCloseTimer = 0;
     releasePostcardFlight();
+    releaseClassicPostcardMotion();
+    var sourceRect = card.getBoundingClientRect();
+    activePostcardSci = card.dataset.sci || '';
+    setPostcardAtlasSource('classic');
+    populatePostcard(
+      activePostcardSci,
+      card.dataset.edu || '',
+      +card.dataset.eduGeneration,
+      card.dataset.eduRevision,
+      card.dataset.eduStateKey,
+      card.dataset.eduStateRevision
+    );
+    preparePostcardShell();
+    revealClassicPostcardShell(card, sourceRect, options.animate !== false);
+  }
+  function openPostcard(card, options) {
+    if (!postcardModal) postcardModal = document.getElementById('postcard-modal');
+    if (!postcardSlot && postcardModal) postcardSlot = postcardModal.querySelector('.postcard-stamp-slot');
+    if (!postcardModal || !postcardSlot || !card) return jumpToSci(card && card.dataset.sci);
+    if (!privateEducatorCardCurrent(card)) { clearSciHash(); return false; }
+    options = options || {};
+    if (!options.preserveHash) clearSciHash();
+    clearTimeout(postcardCloseTimer);
+    postcardCloseTimer = 0;
+    releasePostcardFlight();
+    releaseClassicPostcardMotion();
+    setPostcardAtlasSource('stamps');
     var fit = card.querySelector('.stamp-fit');
     if (!fit) return jumpToSci(card.dataset.sci);
     activePostcardSci = card.dataset.sci || '';
-    populatePostcard(activePostcardSci);
+    populatePostcard(
+      activePostcardSci,
+      card.dataset.edu || '',
+      +card.dataset.eduGeneration,
+      card.dataset.eduRevision,
+      card.dataset.eduStateKey,
+      card.dataset.eduStateRevision
+    );
     postcardSlot.innerHTML = '';
 
     // Capture and replace the live issue before the modal changes body or
@@ -9585,6 +14973,9 @@
     if (card) {
       if (ev.target.closest('.actions, .spectro-wrap')) return;
       if (card.classList.contains('stamp-card')) return openPostcard(card);
+      if (card.classList.contains('classic-atlas-card')) {
+        return openClassicPostcard(card, { animate: ev.detail !== 0 });
+      }
       return jumpToSci(card.dataset.sci);
     }
     var row = ev.target.closest('li[data-sci]');

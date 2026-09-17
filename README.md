@@ -52,11 +52,39 @@ curl -s https://raw.githubusercontent.com/Twarner491/AvianVisitors/avian-visitor
 
 Clones this fork, installs BirdNET-Pi, symlinks the AvianVisitors overlay into the Caddy web root. Takes 20-40 minutes. Reboots when done.
 
-Collage: `http://birdnet.local/`. Stock BirdNET-Pi UI: `http://birdnet.local/index.php`. The menu button in the top right opens an admin overlay with settings, system, log, and tool panels.
+Collage: `http://birdnet.local/`. Stock BirdNET-Pi UI: `http://birdnet.local/index.php`. The menu button in the top right opens an admin overlay with Settings, System, Logs, and Tools.
 
 Stock BirdNET-Pi pages still render, but privileged legacy controls are not enabled. Use the Avian Visitors menu for the station controls it exposes, and SSH for remaining maintenance.
 
-Optional Google Drive backups are set up under **Tools → Your data → Drive archive**. Local cleanup stays unavailable until an archive run has been verified.
+Optional Google Drive backups are set up under **Settings → Nightly Drive backup**. Local cleanup stays unavailable until an archive run has been verified.
+
+### Local admin access
+
+Optional password protection for local administrator controls can be enabled in **Settings**. Public bird pages remain available without signing in, while live audio is unavailable when protection is on.
+
+If no password is configured, or the state is missing or invalid, recover it from an SSH session:
+
+```bash
+sudo /usr/local/sbin/avian-admin-control password-reset
+```
+
+The command prompts privately for a new password. Return to **Settings** after it finishes.
+
+### Educators mode
+
+Educators mode is an optional profile for the BirdNET-Pi website. It adds a fifth menu page for starting, pausing, organizing, and reviewing listening periods. Enable it after installation over SSH:
+
+```bash
+sudo /usr/local/sbin/avian-educators enable
+```
+
+New stations can also install with the profile enabled:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Twarner491/AvianVisitors/avian-visitors/newinstaller.sh | bash -s -- --educators
+```
+
+Listening periods scope the Collage, Stats, Atlas, and available detection clips without copying or protecting audio files from normal retention. Saved period and folder exports require a direct local connection. See [the Educators guide](docs/educators.md) for the full workflow and privacy details.
 
 ### Updating an existing station
 
@@ -139,7 +167,7 @@ Every bird carries its common name, written along a run of its own outline rathe
 
 ## Wall frame
 
-An optional e-ink frame mirrors the collage onto a panel by your window. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, or standalone from BirdWeather data for any ZIP code with no mic at all.
+An optional e-ink frame puts the bird collage on a panel by your window. Build it from [`frame/`](frame/README.md). It can run off your own BirdNET mic, from BirdWeather around a ZIP code, or from one public BirdWeather station with `frame/install.sh --station-id <ID>`.
 
 It draws into the A4 frame's A5 mat opening, as the kit ships. Take the matboard out and the top row of its settings screen — `birdframe`, on the Pi — lets the collage run to the glass instead: 47% of the panel to 94%, and a second day of birds fading out behind the first. That one row moves the five config values it takes; [`frame/README.md`](frame/README.md#layout-the-mat-or-the-bare-panel) lists them.
 

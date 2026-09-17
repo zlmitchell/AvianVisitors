@@ -9,6 +9,7 @@
 #                                           (e.g. a public Cloudflare Worker)
 #   ./install.sh --bird-weather --zip <ZIP> standalone from BirdWeather, no mic
 #                                           (add --ebird-key <KEY> for remote ZIPs)
+#   ./install.sh --station-id <ID>          follow one public BirdWeather station
 set -euo pipefail
 cd "$(dirname "$0")"
 FRAME="$(pwd)"
@@ -16,6 +17,7 @@ REPO="$(dirname "$FRAME")"   # the checkout this frame was installed from
 
 MODE=local            # local | image | birdweather
 ZIP=""
+STATION_ID=""
 IMAGE_URL=""
 EBIRD_KEY=""
 GIVEN_ARGS=$#
@@ -25,6 +27,9 @@ while [ $# -gt 0 ]; do
     --zip) [ $# -ge 2 ] || { echo "--zip needs a value, e.g. --zip 94107" >&2; exit 1; }
            ZIP="$2"; shift 2 ;;
     --zip=*) ZIP="${1#*=}"; shift ;;
+    --station-id) [ $# -ge 2 ] || { echo "--station-id needs a value, e.g. --station-id 12345" >&2; exit 1; }
+                  MODE=birdweather; STATION_ID="$2"; shift 2 ;;
+    --station-id=*) MODE=birdweather; STATION_ID="${1#*=}"; shift ;;
     --image-url) [ $# -ge 2 ] || { echo "--image-url needs a URL, e.g. --image-url https://bird.example/frame.png" >&2; exit 1; }
                  MODE=image; IMAGE_URL="$2"; shift 2 ;;
     --image-url=*) MODE=image; IMAGE_URL="${1#*=}"; shift ;;
@@ -43,6 +48,10 @@ if [ "$GIVEN_ARGS" -eq 0 ] && [ -t 0 ] && [ -r /dev/tty ]; then
   frame_pick_mode
 fi
 
+if [ -n "$IMAGE_URL" ] && { [ "$MODE" = birdweather ] || [ -n "$ZIP" ] || [ -n "$STATION_ID" ] || [ -n "$EBIRD_KEY" ]; }; then
+  echo "--image-url cannot be combined with BirdWeather options" >&2
+  exit 1
+fi
 if [ -n "$ZIP" ] && [ "$MODE" != birdweather ]; then
   echo "--zip only applies with --bird-weather" >&2
   exit 1
@@ -51,18 +60,33 @@ if [ -n "$EBIRD_KEY" ] && [ "$MODE" != birdweather ]; then
   echo "--ebird-key only applies with --bird-weather" >&2
   exit 1
 fi
+if [ -n "$ZIP" ] && [ -n "$STATION_ID" ]; then
+  echo "use either --zip or --station-id, not both" >&2
+  exit 1
+fi
+if [ -n "$STATION_ID" ] && [ -n "$EBIRD_KEY" ]; then
+  echo "--ebird-key only applies to BirdWeather ZIP mode" >&2
+  exit 1
+fi
 
 # Validate inputs up front: a bad value would otherwise land in a config file or
 # a systemd unit verbatim. These checks also reject a flag passed as a value
 # (e.g. "--zip --image-url"), which would fail the format below.
 if [ "$MODE" = birdweather ]; then
-  if [ -z "$ZIP" ]; then
-    echo "--bird-weather needs --zip <ZIP code>, e.g. install.sh --bird-weather --zip 94107" >&2
+  if [ -z "$ZIP" ] && [ -z "$STATION_ID" ]; then
+    echo "BirdWeather mode needs --zip <ZIP code> or --station-id <ID>" >&2
     exit 1
   fi
-  if ! printf '%s' "$ZIP" | LC_ALL=C grep -qE '^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$'; then
+  if [ -n "$ZIP" ] && ! printf '%s' "$ZIP" | LC_ALL=C grep -qE '^[A-Za-z0-9][A-Za-z0-9 -]{0,8}[A-Za-z0-9]$'; then
     echo "--zip should look like a postal code, e.g. 94107 or SW1A 1AA" >&2
     exit 1
+  fi
+  if [ -n "$STATION_ID" ]; then
+    if ! printf '%s' "$STATION_ID" | LC_ALL=C grep -qE '^[1-9][0-9]{0,9}$' \
+        || [ "$STATION_ID" -gt 2147483647 ]; then
+      echo "--station-id must be a number from 1 through 2147483647" >&2
+      exit 1
+    fi
   fi
   if [ -n "$EBIRD_KEY" ] && ! printf '%s' "$EBIRD_KEY" | LC_ALL=C grep -qE '^[A-Za-z0-9]+$'; then
     echo "--ebird-key should be the alphanumeric token from ebird.org/api/keygen" >&2
@@ -80,6 +104,59 @@ if [ "$MODE" = image ]; then
   esac
   if printf '%s' "$IMAGE_URL" | LC_ALL=C grep -q '[^A-Za-z0-9._~:/?#@!$&()*+,;=%-]'; then
     echo "--image-url has characters that are not allowed in a URL" >&2
+    exit 1
+  fi
+fi
+
+# An existing config is left alone, so before anything on the host changes it
+# has to still select the source this run asked for - a re-run must not claim
+# a different station or ZIP was installed while preserving an older file.
+# config_contract.py is a semantic TOML check rather than a grep for the mode
+# marker: it accepts a local config that fetches its picture from a render
+# server (shoot = false, image_url set), which the marker alone cannot tell
+# from a broken one.
+CONFIG="$HOME/.birdframe/config.toml"
+CONFIG_EXISTS=0
+if [ -f "$CONFIG" ]; then
+  CONFIG_EXISTS=1
+  CONFIG_PYTHON=""
+  if python3 -c 'import tomllib' >/dev/null 2>&1 \
+      || python3 -c 'import tomli' >/dev/null 2>&1; then
+    CONFIG_PYTHON=python3
+  elif [ -x "$FRAME/.venv/bin/python" ] \
+      && { "$FRAME/.venv/bin/python" -c 'import tomllib' >/dev/null 2>&1 \
+           || "$FRAME/.venv/bin/python" -c 'import tomli' >/dev/null 2>&1; }; then
+    CONFIG_PYTHON="$FRAME/.venv/bin/python"
+  else
+    echo "Cannot safely verify the existing frame config without Python tomllib or tomli." >&2
+    echo "Review $CONFIG manually before running the installer again." >&2
+    exit 1
+  fi
+  CONFIG_ARGS=("$CONFIG" --mode "$MODE")
+  if [ -n "$STATION_ID" ]; then CONFIG_ARGS+=(--station-id "$STATION_ID"); fi
+  if [ -n "$ZIP" ]; then CONFIG_ARGS+=(--zip "$ZIP"); fi
+  if [ -n "$IMAGE_URL" ]; then CONFIG_ARGS+=(--image-url "$IMAGE_URL"); fi
+  if ! "$CONFIG_PYTHON" "$FRAME/config_contract.py" "${CONFIG_ARGS[@]}" >/dev/null 2>&1; then
+    case "$MODE" in
+      birdweather)
+        if [ -n "$STATION_ID" ]; then
+          echo "$CONFIG does not select BirdWeather station $STATION_ID." >&2
+        else
+          echo "$CONFIG does not select BirdWeather ZIP $ZIP." >&2
+        fi
+        ;;
+      image) echo "$CONFIG does not select image URL $IMAGE_URL." >&2 ;;
+      local) echo "$CONFIG does not select a supported local or preserved image source." >&2 ;;
+    esac
+    echo "Run 'birdframe' to switch it over, or remove it and re-run the installer." >&2
+    exit 1
+  fi
+fi
+
+if [ -n "$STATION_ID" ] && [ "$CONFIG_EXISTS" = 0 ]; then
+  echo "Checking public BirdWeather station $STATION_ID..."
+  if ! python3 "$FRAME/birdweather.py" --station-id "$STATION_ID" --check-station >/dev/null; then
+    echo "BirdWeather station $STATION_ID could not be verified. Check the public station-page URL and try again." >&2
     exit 1
   fi
 fi
@@ -155,22 +232,15 @@ if [ "$NEEDS_BROWSER" = 1 ]; then
 fi
 
 echo "4/6  Writing config..."
-CONFIG="$HOME/.birdframe/config.toml"
-if [ -f "$CONFIG" ]; then
-  EXISTING="$(sed -n 's/^# birdframe-mode: //p' "$CONFIG" | head -1)"
-  if [ -n "$EXISTING" ] && [ "$EXISTING" != "$MODE" ]; then
-    echo "     $CONFIG is set up for '$EXISTING' mode, not '$MODE'." >&2
-    echo "     Run 'birdframe' to switch it over, or remove it and re-run:" >&2
-    echo "       rm $CONFIG" >&2
-    exit 1
-  fi
+if [ "$CONFIG_EXISTS" = 1 ]; then
   echo "     $CONFIG already exists, leaving it untouched."
 else
   # config.example.toml is the one description of every setting the frame has.
   # This writes it out with the mode's values already set, rather than keeping
-  # a second, shorter, drifting copy of the same defaults in this file. --zip
-  # and --image-url are ignored by the modes that do not use them.
-  .venv/bin/python config_tui.py --config "$CONFIG" --init "$MODE" --zip "$ZIP" --image-url "$IMAGE_URL"
+  # a second, shorter, drifting copy of the same defaults in this file. --zip,
+  # --station-id and --image-url are ignored by the modes that do not use them.
+  .venv/bin/python config_tui.py --config "$CONFIG" --init "$MODE" \
+    --zip "$ZIP" --station-id "$STATION_ID" --image-url "$IMAGE_URL"
 fi
 
 sudo ln -sfn "$FRAME/birdframe-names" /usr/local/bin/birdframe-names
@@ -322,27 +392,41 @@ and refreshes every 15 min, only when the birds change.
 DONE
     ;;
   birdweather)
-    cat <<DONE
+    if [ -n "$STATION_ID" ]; then
+      SOURCE_LABEL="BirdWeather station $STATION_ID"
+      MISSING_ARGS=(--station-id "$STATION_ID" --missing)
+      GENERATE_ARG="--station-id $STATION_ID"
+      cat <<DONE
+
+Installed for BirdWeather station $STATION_ID. The frame renders that station's
+birds on the Pi and refreshes every 15 min, only when its top birds change.
+DONE
+    else
+      SOURCE_LABEL="the area near $ZIP"
+      MISSING_ARGS=("$ZIP" --missing)
+      GENERATE_ARG="--zip $ZIP"
+      cat <<DONE
 
 Installed in BirdWeather mode for ZIP $ZIP. The frame renders the top birds near
 you on the Pi and refreshes every 15 min, only when the local top birds change.
 DONE
-    # The bundled illustrations center on the western U.S. If birds near this ZIP
-    # aren't in the cloned set the frame quietly skips them, which has tripped
-    # people up - surface it here and point at the generator.
-    MISSING="$("$FRAME/.venv/bin/python" "$FRAME/birdweather.py" "$ZIP" --missing 2>/dev/null || true)"
+    fi
+    # The bundled illustrations center on the western U.S. If birds from this
+    # source aren't in the cloned set the frame quietly skips them, which has
+    # tripped people up - surface it here and point at the generator.
+    MISSING="$("$FRAME/.venv/bin/python" "$FRAME/birdweather.py" "${MISSING_ARGS[@]}" 2>/dev/null || true)"
     if [ -n "$MISSING" ]; then
       N="$(printf '%s\n' "$MISSING" | grep -c . || true)"
       NAMES="$(printf '%s\n' "$MISSING" | head -8 | sed 's/.*|/    /')"
       if [ "$N" -gt 8 ]; then NAMES="$NAMES
     ... and $((N - 8)) more"; fi
       cat <<FLAG
-Heads up: $N local bird(s) near you aren't in the illustration set you cloned, so
+Heads up: $N bird(s) from $SOURCE_LABEL aren't in the illustration set you cloned, so
 the frame will skip them:
 $NAMES
 To add them, run this on a laptop or workstation (it needs rembg, which the Pi
 can't fit) and commit or copy the new cutouts over:
-  python3 $FRAME/generate_illustrations.py --zip $ZIP --gemini-key <KEY>
+  python3 $FRAME/generate_illustrations.py $GENERATE_ARG --gemini-key <KEY>
 A paid Google Gemini API key is needed: https://ai.google.dev
 FLAG
     fi

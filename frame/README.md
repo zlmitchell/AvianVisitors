@@ -64,6 +64,9 @@ since there is no terminal to ask at:
 # No microphone: draw the collage from BirdWeather for any ZIP code.
 ./install.sh --bird-weather --zip 94107
 
+# No microphone: follow one public BirdWeather station exactly.
+./install.sh --station-id 12345
+
 # Bird mic hosted at a public URL: point the frame straight at it.
 ./install.sh --image-url https://bird.onethreenine.net/frame.png?k=YOUR_FRAME_KEY
 ```
@@ -235,12 +238,14 @@ A note on `tests/test_frame_layout.py`: the brackets and the fade-step count liv
 
 ### BirdWeather mode, and birds the bundle cannot draw
 
-BirdWeather mode renders on the Pi from this repo's illustrations on GitHub, so there is no image set to copy over. ZIP codes with no station nearby fall back to the closest ones. If you are far from any BirdWeather station, add `--ebird-key <key>` (a free key from [ebird.org/api/keygen](https://ebird.org/api/keygen)) and the frame fills from eBird sightings instead.
+BirdWeather mode renders on the Pi from this repo's illustrations on GitHub, so there is no image set to copy over. In ZIP mode, postal codes with no station nearby fall back to the closest ones. If you are far from any BirdWeather station, add `--ebird-key <key>` (a free key from [ebird.org/api/keygen](https://ebird.org/api/keygen)) and the frame fills from eBird sightings instead. Exact station mode has no geographic or eBird fallback.
 
-The bundled illustrations center on the western U.S. If birds near your ZIP aren't in the set you cloned, the installer flags them and the frame skips them until they exist. To generate them, run [`generate_illustrations.py`](generate_illustrations.py) on a laptop or workstation (it uses the same rembg cutout as the rest of the pipeline, which the Pi can't fit in memory), passing your ZIP and a paid Google Gemini key, then commit the new cutouts or copy them to the Pi:
+The bundled illustrations center on the western U.S. If birds for your ZIP or station aren't in the set you cloned, the installer flags them and the frame skips them until they exist. To generate them, run [`generate_illustrations.py`](generate_illustrations.py) on a laptop or workstation (it uses the same rembg cutout as the rest of the pipeline, which the Pi can't fit in memory), passing your source and a paid Google Gemini key, then commit the new cutouts or copy them to the Pi:
 
 ```bash
 python3 generate_illustrations.py --zip 10001 --gemini-key YOUR_GEMINI_KEY
+# or for one station
+python3 generate_illustrations.py --station-id 12345 --gemini-key YOUR_GEMINI_KEY
 ```
 
-It generates only the species you're missing; `--country` and `--sample` carry through for non-US postcodes or a wider region.
+It generates only the species you're missing. `--country` supports non-US postcodes, and `--sample` controls how many top species are checked.
