@@ -63,6 +63,9 @@ RUN exe=$(find /ms-playwright -type f -perm -u+x -name 'chrome-headless-shell' -
 WORKDIR /app
 COPY frame/ /app/frame/
 COPY avian/frontend/fonts/ /app/avian/frontend/fonts/
+# capture_art.py validates every PNG it composites with this, and loads it from
+# beside frame/ - without it the first render dies on import.
+COPY avian/scripts/png_validation.py /app/avian/scripts/png_validation.py
 COPY extras/render-server/render_server.py /app/extras/render-server/render_server.py
 
 # A bind mount over /app shadows all of this, which is how development works:
