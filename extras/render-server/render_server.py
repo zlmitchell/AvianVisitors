@@ -117,14 +117,14 @@ def reap_orphans():
 
 def render_once(cfg, why):
     tmp = PARTIAL
-    # display.capture() is the one place that turns a frame config into shoot()
+    # display.capture_site() is the one place that turns a frame config into shoot()
     # arguments, and it is shared with the Pi on purpose. This used to keep its
     # own copy of that argument list, which is how shoot_cluster_ybias came to
     # be honoured by the frame and ignored here: the flock went on packing to
     # the shape of a mat that had been taken off, and nothing failed - it just
     # looked slightly wrong on a wall.
     try:
-        display.capture(cfg, tmp)
+        display.capture_site(cfg, tmp)
     finally:
         reap_orphans()
     # A render can succeed and still be wrong. The browser reports the

@@ -24,7 +24,13 @@ import sys
 import time
 import urllib.request
 
-import metrics
+try:
+    import metrics
+except ModuleNotFoundError:
+    # Loaded by file path (the tests do) rather than run from frame/: the bare
+    # sibling imports here and below need this directory on the path.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import metrics
 from datetime import datetime, timedelta
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
@@ -145,6 +151,7 @@ DEFAULTS = {
     "heal_hours": 24,
     "state": "~/.birdframe/state.json",
     "cache": "~/.birdframe",
+    "bundle_root": "~/.birdframe/bundles",
     "timeout": 180,      # seconds; a Zero 2 W needs ~70-120s to shoot the collage
     "basic_user": None, "basic_pass": None,
 }
@@ -188,7 +195,9 @@ def fetch_recent(base, hours, timeout, auth=None):
         req.add_header("Authorization", auth)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         payload = json.loads(r.read(2_000_000))
-    return payload.get("species", []) or [], payload.get("anchor")
+    if not isinstance(payload, dict) or not isinstance(payload.get("species"), list):
+        raise ValueError("recent API has no species list")
+    return payload["species"], payload.get("anchor")
 
 
 def parse_station_ts(value):
@@ -304,18 +313,26 @@ def birdweather_signature_scope(cfg):
     return f"birdweather:zip:{cfg['bw_country']}:{value}:days:{cfg['bw_days']}"
 
 
-def fetch_species(cfg, auth=None):
+def fetch_species(cfg, auth=None, drawable=None):
     """(species, anchor) for the signature and the render: the BirdNET-Pi
     recent API by default, or BirdWeather detections from one station or near
     a ZIP when species_source = "birdweather". BirdWeather reports no
     per-species last_seen, so it has no anchor and no bird is ever outlined
-    there."""
+    there. `drawable` limits BirdWeather to what the active bundle can draw."""
     if cfg.get("species_source") == "birdweather":
         import birdweather
         kind, value = birdweather_locator(cfg)
+        inventory = {} if drawable is None else {"drawable": drawable}
         if kind == "station":
-            return birdweather.species_for_station(value, days=cfg["bw_days"]), None
-        return birdweather.species_for_zip(value, country=cfg["bw_country"], days=cfg["bw_days"]), None
+            return birdweather.species_for_station(
+                value, days=cfg["bw_days"], **inventory
+            ), None
+        return birdweather.species_for_zip(
+            value,
+            country=cfg["bw_country"],
+            days=cfg["bw_days"],
+            **inventory,
+        ), None
     return fetch_recent(cfg["base_url"], cfg["hours"], cfg["timeout"], auth)
 
 
@@ -719,7 +736,7 @@ def frame_url(url, bird_names, fresh_minutes=None, fade=None):
 
 
 # --- run --------------------------------------------------------------------
-def capture(cfg, out, m=None):
+def capture_site(cfg, out, m=None, *, capture=None, bundle_options=None):
     """Screenshot the station's collage into `out`, as this config asks for it.
 
     The one place that turns a frame config into shoot() arguments. It exists
@@ -742,27 +759,46 @@ def capture(cfg, out, m=None):
           bird_names=cfg["bird_names"], fresh_minutes=cfg["fresh_minutes"],
           fade=fade_param(cfg), collage_vh=cfg["shoot_collage_vh"],
           cluster_ybias=cfg["shoot_cluster_ybias"],
-          label_scale=label_scale(cfg), metrics=m)
+          label_scale=label_scale(cfg), metrics=m,
+          capture=capture, **(bundle_options or {}))
     return out
 
 
-def obtain_image(cfg, species=None, m=None):
+def obtain_image(cfg, species=None, bundle=None, m=None, *, capture=None):
+    bundle_options = (
+        {}
+        if bundle is None
+        else {
+            "cutout_resolver": bundle.resolve,
+            "dims_path": bundle.dims_path,
+            "masks_path": bundle.masks_path,
+            "bundle_assets": bundle.assets_response,
+        }
+    )
     if cfg.get("species_source") == "birdweather":
         from shoot import shoot_birdweather
         if species is None:  # gate skipped (--no-signature): fetch the list to render
-            species, _ = fetch_species(cfg, _auth(cfg))
+            species, _ = fetch_species(
+                cfg,
+                _auth(cfg),
+                drawable=None if bundle is None else bundle.drawable_slugs,
+            )
         out = os.path.join(os.path.expanduser(cfg["cache"]), "frame.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         shoot_birdweather(out, species, title=cfg["shoot_title"], subtitle=cfg["shoot_subtitle"],
                           timeout_ms=cfg["timeout"] * 1000, bird_names=cfg["bird_names"],
                           collage_vh=cfg["shoot_collage_vh"], label_scale=label_scale(cfg),
                           cluster_ybias=cfg["shoot_cluster_ybias"],
-                          metrics=m)
+                          metrics=m, capture=capture, **bundle_options)
         return Image.open(out).convert("RGB")
     if cfg["shoot"]:
         out = os.path.join(os.path.expanduser(cfg["cache"]), "shot.png")
-        capture(cfg, out, m)
+        capture_site(cfg, out, m, capture=capture, bundle_options=bundle_options)
         return Image.open(out).convert("RGB")
+    if bundle is not None:
+        raise ValueError(
+            "an active illustration bundle requires local or BirdWeather render mode"
+        )
     src = cfg["image_url"] or cfg["image"]
     if not src:
         raise ValueError("set image, image_url, or shoot in config")
@@ -774,6 +810,21 @@ def obtain_image(cfg, species=None, m=None):
     if cfg["image_url"]:
         src = frame_url(src, cfg["bird_names"], cfg["fresh_minutes"], fade_param(cfg))
     return get_image(src, cfg["timeout"], _auth(cfg))
+
+
+def _signed(cfg, species, anchor, bundle):
+    """(signature, fresh, fading) for a species list. Bound to the active
+    bundle's selection, so switching illustrations redraws the panel even when
+    the birds have not changed."""
+    fresh = fresh_slugs(species, anchor, cfg["fresh_minutes"])
+    fading = fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"])
+    scope = birdweather_signature_scope(cfg) if cfg.get("species_source") == "birdweather" else ""
+    sig = signature(species, fresh, fading, scope)
+    if bundle is not None:
+        sig = hashlib.sha256(
+            (sig + ":" + bundle.reference.get("selection_revision", bundle.reference["revision"])).encode()
+        ).hexdigest()[:16]
+    return sig, fresh, fading
 
 
 def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
@@ -788,13 +839,21 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
     sig = None
     species = None
     anchor = None          # the station's clock, for the corner mark
+    try:
+        from bundle_runtime import active_bundle
+        bundle = active_bundle(cfg.get("bundle_root"))
+    except Exception as error:
+        print(f"active bundle validation failed: {error}", file=sys.stderr)
+        m.close(outcome="bundle-invalid", error=str(error))
+        return False
     if use_signature:
         try:
-            species, anchor = fetch_species(cfg, _auth(cfg))
-            fresh = fresh_slugs(species, anchor, cfg["fresh_minutes"])
-            fading = fade_steps(species, anchor, cfg["fade_hours"], cfg["hours"])
-            scope = birdweather_signature_scope(cfg) if cfg.get("species_source") == "birdweather" else ""
-            sig = signature(species, fresh, fading, scope)
+            species, anchor = fetch_species(
+                cfg,
+                _auth(cfg),
+                drawable=None if bundle is None else bundle.drawable_slugs,
+            )
+            sig, fresh, fading = _signed(cfg, species, anchor, bundle)
             # What the renderer is about to draw, in the journal. Without this
             # the only way to tell an outline that is off from one that simply
             # has no bird to sit on is to go and look at the panel.
@@ -807,20 +866,25 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
         if in_quiet_hours(cfg, datetime.now().hour):
             print("quiet hours; skip")
             m.close(outcome="quiet-hours")
-            return
+            return True
         if not changed and not heal_due:
             print("no change; skip")
             m.close(outcome="no-change")
-            return
+            return True
         print("refresh:", "changed" if changed else "heal")
 
     mark = m.marks(scope="display")
     try:
-        img = fit_panel(obtain_image(cfg, species, m))
+        capture = {}
+        img = fit_panel(obtain_image(cfg, species, bundle, m, capture=capture))
+        # Remember what was drawn, not what was asked about: the page fetches
+        # its own list, and a bird can arrive between the two.
+        if "species" in capture:
+            sig = _signed(cfg, capture["species"], anchor, bundle)[0]
     except Exception as e:
         print(f"could not get image: {e}", file=sys.stderr)  # keep last panel image
         m.close(outcome="render-failed", error=str(e))
-        return
+        return False
     mark("obtain.image")
     lay = layout_of(cfg)
     img = mat_and_center(img, lay["mat"], lay["opening"], lay["aspect"],
@@ -835,17 +899,18 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
         mark("dither.and.save")
         print(f"wrote preview {preview}")
         m.close(outcome="preview", species=len(species or []))
-        return
+        return True
     try:
         push_panel(img, cfg["rotate"], cfg["saturation"], cfg.get("panel", ""))
     except Exception as e:
         print(f"panel push failed: {e}", file=sys.stderr)
         m.close(outcome="push-failed", error=str(e))
-        return
+        return False
     mark("panel.push")
     save_state(cfg["state"], sig if sig is not None else state.get("signature"), now)
     print("panel updated")
     m.close(outcome="updated", species=len(species or []))
+    return True
 
 
 def _toml_error(path, exc):
@@ -934,6 +999,7 @@ def main():
     ap.add_argument("-o", "--set", dest="overrides", action="append", metavar="KEY=VALUE",
                     help="override one config value for this run only, repeatable: "
                          "-o fresh_minutes=0 -o opening=0.7071. Not written to config.toml.")
+    ap.add_argument("--wait-lock", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     try:
@@ -970,13 +1036,21 @@ def main():
     except ModuleNotFoundError:
         fcntl = None
     if fcntl is not None:
+        flags = fcntl.LOCK_EX if args.wait_lock else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, flags)
         except OSError:
             print("another render is in progress; skipping")
-            return
-    run(cfg, preview=args.preview, force=args.force, use_signature=not args.no_signature, mat_box=args.mat_box)
+            return 0
+    succeeded = run(
+        cfg,
+        preview=args.preview,
+        force=args.force,
+        use_signature=not args.no_signature,
+        mat_box=args.mat_box,
+    )
+    return 0 if succeeded else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

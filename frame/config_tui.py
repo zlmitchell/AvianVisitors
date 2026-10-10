@@ -73,7 +73,7 @@ SECTIONS = [
         "timestamp",
     ]),
     ("Refresh cadence", ["quiet_start", "quiet_end", "heal_hours"]),
-    ("Paths and timeouts", ["state", "cache", "timeout"]),
+    ("Paths and timeouts", ["state", "cache", "bundle_root", "timeout"]),
     ("Basic auth - only if your whole site is behind it", ["basic_user", "basic_pass"]),
 ]
 
@@ -124,6 +124,7 @@ HELP = {
     "quiet_start": "start of the hours the panel stays quiet (0/0 = always refresh on change)",
     "quiet_end": "end of the quiet hours",
     "heal_hours": "force a refresh at least this often, even with nothing changed",
+    "bundle_root": "where `avian-bundle use` keeps verified illustration bundles; the active one replaces the included art",
     "state": "where the change signature is kept between runs",
     "cache": "working directory for the shot and the panel lock",
     "timeout": "seconds for a fetch or a render; a Zero 2 W needs ~70-120s to shoot the collage",
@@ -187,7 +188,8 @@ LABELS = {
     "timestamp": "corner timestamp",
     "quiet_start": "quiet from", "quiet_end": "quiet until",
     "heal_hours": "redraw at least every",
-    "state": "state file", "cache": "working folder", "timeout": "give up after",
+    "state": "state file", "cache": "working folder", "bundle_root": "illustration bundles",
+    "timeout": "give up after",
     "basic_user": "basic-auth user", "basic_pass": "basic-auth password",
 }
 

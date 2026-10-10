@@ -71,7 +71,12 @@ since there is no terminal to ask at:
 ./install.sh --image-url https://bird.onethreenine.net/frame.png?k=YOUR_FRAME_KEY
 ```
 
-Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml` — which is [`config.example.toml`](config.example.toml) with your mode's values set, so every option and the reasoning behind it is on the Pi with you.
+Run `./install.sh` as your regular SSH user, without `sudo`; the installer asks
+for elevation only for the system files and services it manages.
+Reruns with an existing config require system Python 3.11 or newer, or a system
+`tomli` package; the installer does not execute the prior virtual environment.
+
+Each one enables SPI + I2C, installs the deps and a systemd timer, and writes `~/.birdframe/config.toml` — which is [`config.example.toml`](config.example.toml) with your mode's values set, so every option and the reasoning behind it is on the Pi with you. The station ID is the public number at the end of a BirdWeather station-page URL, not its upload token. ZIP mode summarizes nearby stations and can use fallbacks; station mode shows only that station and fails rather than substituting another source.
 
 On a **first** install SPI is not up yet, so it reboots and the timer draws the first frame about two minutes later. On a **re-run or upgrade** SPI is already up, so it restarts the units and forces one render immediately — without that the panel would sit on the old picture, because an upgrade changes how the frame renders but not what the birds are doing, and the change-gate would correctly decide there was nothing to redraw.
 
@@ -238,7 +243,32 @@ A note on `tests/test_frame_layout.py`: the brackets and the fade-step count liv
 
 ### BirdWeather mode, and birds the bundle cannot draw
 
-BirdWeather mode renders on the Pi from this repo's illustrations on GitHub, so there is no image set to copy over. In ZIP mode, postal codes with no station nearby fall back to the closest ones. If you are far from any BirdWeather station, add `--ebird-key <key>` (a free key from [ebird.org/api/keygen](https://ebird.org/api/keygen)) and the frame fills from eBird sightings instead. Exact station mode has no geographic or eBird fallback.
+When updating a paired mic and frame, update both. The frame waits for the mic's collage to finish loading before capturing it. An older mic frontend cannot confirm this, so the frame keeps its previous image and logs an update reminder. Capture now requires Pillow as well as Playwright, including standalone `shoot.py` use.
+
+Update the mic through **Tools > Pull latest**. On the frame Pi, pull the update and request a fresh capture:
+
+```bash
+cd ~/AvianVisitors/frame && git pull --ff-only && \
+  .venv/bin/python display.py --config ~/.birdframe/config.toml --force
+```
+
+If Git reports local edits, preserve them and resolve that before updating.
+
+Slow, incomplete, or corrupt artwork and a changing collage leave the last good frame and refresh state untouched. Capture validates the exact PNG/WebP responses used by the browser, then combines their artwork with small transparent captures of the titles and labels. If artwork validation repeatedly fails, check the source illustration before retrying; preserve custom artwork and do not delete the previous frame. Desktop and container tests do not replace a capture check on the frame Pi.
+
+### Change the illustration bundle
+
+After SSHing into the frame, copy a bundle ID from [avianvisitors.com/bundles](https://avianvisitors.com/bundles) and run:
+
+```bash
+sudo avian-bundle use '<BUNDLE_ID>'
+```
+
+The command uses the mirrored station's location or the frame's configured BirdWeather ZIP or station to download that area's birds. It verifies every PNG, activates the selection atomically, and renders when the selection changes. If the download or render fails, the prior bundle stays active. Without a location, it installs the full bundle. Add `--all-species` to request the full bundle explicitly.
+
+Bundle switching applies to local render and BirdWeather modes. An `--image-url` frame displays pixels rendered by its remote source, so select the illustration bundle on that source.
+
+Without a selected bundle, BirdWeather mode renders on the Pi from this repo's illustrations on GitHub. A selected bundle replaces that source with its downloaded, verified illustrations. In ZIP mode, postal codes with no station nearby fall back to the closest ones. If you are far from any BirdWeather station, add `--ebird-key <key>` (a free key from [ebird.org/api/keygen](https://ebird.org/api/keygen)) and the frame fills from eBird sightings instead. Exact station mode has no geographic or eBird fallback.
 
 The bundled illustrations center on the western U.S. If birds for your ZIP or station aren't in the set you cloned, the installer flags them and the frame skips them until they exist. To generate them, run [`generate_illustrations.py`](generate_illustrations.py) on a laptop or workstation (it uses the same rembg cutout as the rest of the pipeline, which the Pi can't fit in memory), passing your source and a paid Google Gemini key, then commit the new cutouts or copy them to the Pi:
 
