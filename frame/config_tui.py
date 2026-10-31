@@ -68,7 +68,7 @@ SECTIONS = [
     ]),
     ("Currently singing, and going quiet", ["fresh_minutes", "fade_hours"]),
     ("Panel and layout", [
-        "rotate", "saturation", "panel", "mat", "opening", "opening_aspect",
+        "rotate", "saturation", "panel", "cb1_cs1_pin", "mat", "opening", "opening_aspect",
         "title_frac", "title_position", "collage_frac", "gap_frac", "label_scale",
         "timestamp",
     ]),
@@ -82,6 +82,7 @@ CHOICES = {
     "rotate": [90, 270],
     "title_position": ["top", "bottom"],
     "panel": ["", "el133uf1"],
+    "cb1_cs1_pin": [7, 12, 16, 18, 26, 28, 31, 32, 35, 40],
     "bw_country": ["us", "gb", "ca", "au", "de", "fr", "nl", "se"],
 }
 
@@ -112,6 +113,7 @@ HELP = {
     "rotate": "90 or 270, depending which way up the frame hangs",
     "saturation": "Inky colour saturation, 0 to 1",
     "panel": "force a driver if auto-detect ever fails",
+    "cb1_cs1_pin": "BTT CB1 only: the header pin the panel's pin 36 (second chip select) is jumpered to, since the CB1 leaves 36 unwired",
     "mat": "extra shrink of the content inside the opening (0 = none)",
     "opening": "the opening's height as a fraction of the panel. A5 mat 0.7071, bare panel 0.97",
     "opening_aspect": "the opening's width over its height. A5 mat 0.7071, bare panel 0.75",
@@ -179,7 +181,7 @@ LABELS = {
     "shoot_count_exp": "loud birds dominate", "shoot_collage_vh": "drawn at",
     "fresh_minutes": "outline birds heard within", "fade_hours": "start fading after",
     "rotate": "which way up", "saturation": "colour strength",
-    "panel": "panel driver", "mat": "extra inset",
+    "panel": "panel driver", "cb1_cs1_pin": "CB1 chip-select jumper", "mat": "extra inset",
     "opening": "opening height", "opening_aspect": "opening shape",
     "title_frac": "title height", "title_position": "title sits at",
     "collage_frac": "birds fill", "gap_frac": "space under the title",

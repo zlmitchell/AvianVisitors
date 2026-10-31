@@ -663,19 +663,52 @@ if [ "$MODE" = image ]; then NEEDS_BROWSER=0; fi
 CONFIG_TXT=/boot/firmware/config.txt
 [ -f "$CONFIG_TXT" ] || CONFIG_TXT=/boot/config.txt
 
+# A BigTreeTech CB1 runs Armbian: no raspi-config, no config.txt, and the
+# header SPI is bus 1 (display.py drives the panel there and on the CB1's own
+# GPIO lines, and skips the I2C ID chip its header does not wire).
+CB1=0
+grep -qs 'bigtreetech,cb1' /proc/device-tree/compatible && CB1=1
+ARMBIAN_ENV=/boot/armbianEnv.txt
+SPIDEV=/dev/spidev0.0
+[ "$CB1" = 1 ] && SPIDEV=/dev/spidev1.1
+
 # Every step below is a no-op on a re-run if what it installs is already there.
 # A fresh install is unchanged; a re-run (or an upgrade) skips straight to the
 # config and the render instead of spending minutes re-checking apt and pip.
 
-echo "1/6  Enabling SPI + I2C (Inky needs both; SPI with no chip-select)..."
-if [ "$(sudo raspi-config nonint get_spi 2>/dev/null || echo 1)" = 0 ] \
-   && [ "$(sudo raspi-config nonint get_i2c 2>/dev/null || echo 1)" = 0 ]; then
-  echo "     SPI + I2C already enabled."
+if [ "$CB1" = 1 ]; then
+  echo "1/6  Enabling SPI bus 1 (BigTreeTech CB1: spidev1.1 on the 40-pin header)..."
+  [ -f "$ARMBIAN_ENV" ] || install_fail "$ARMBIAN_ENV not found; is this the BTT CB1 Armbian image?"
+  if grep -Eq '^overlays=(.* )?spidev1_1( |$)' "$ARMBIAN_ENV"; then
+    echo "     spidev1_1 overlay already enabled."
+  elif grep -q '^overlays=' "$ARMBIAN_ENV"; then
+    sudo sed -i 's/^overlays=\(.*\)$/overlays=\1 spidev1_1/' "$ARMBIAN_ENV"
+  else
+    echo "overlays=spidev1_1" | sudo tee -a "$ARMBIAN_ENV" >/dev/null
+  fi
+  # Raspberry Pi OS hands spidev and gpiochip to the spi/gpio groups; Armbian
+  # leaves both root-only, so the unprivileged frame service could not push.
+  CB1_UDEV_RULE=/etc/udev/rules.d/60-birdframe-cb1.rules
+  sudo /usr/sbin/groupadd -f --system spi
+  sudo /usr/sbin/groupadd -f --system gpio
+  sudo /usr/sbin/usermod -aG spi,gpio "$INSTALL_USER"
+  printf '%s\n' \
+    'SUBSYSTEM=="spidev", KERNEL=="spidev1.1", GROUP="spi", MODE="0660"' \
+    'SUBSYSTEM=="gpio", KERNEL=="gpiochip0", GROUP="gpio", MODE="0660"' \
+    | sudo tee "$CB1_UDEV_RULE" >/dev/null
+  sudo /usr/bin/udevadm control --reload
+  sudo /usr/bin/udevadm trigger --subsystem-match=spidev --subsystem-match=gpio
 else
-  sudo raspi-config nonint do_spi 0
-  sudo raspi-config nonint do_i2c 0
+  echo "1/6  Enabling SPI + I2C (Inky needs both; SPI with no chip-select)..."
+  if [ "$(sudo raspi-config nonint get_spi 2>/dev/null || echo 1)" = 0 ] \
+     && [ "$(sudo raspi-config nonint get_i2c 2>/dev/null || echo 1)" = 0 ]; then
+    echo "     SPI + I2C already enabled."
+  else
+    sudo raspi-config nonint do_spi 0
+    sudo raspi-config nonint do_i2c 0
+  fi
+  grep -q "^dtoverlay=spi0-0cs" "$CONFIG_TXT" || echo "dtoverlay=spi0-0cs" | sudo tee -a "$CONFIG_TXT" >/dev/null
 fi
-grep -q "^dtoverlay=spi0-0cs" "$CONFIG_TXT" || echo "dtoverlay=spi0-0cs" | sudo tee -a "$CONFIG_TXT" >/dev/null
 
 echo "2/6  Installing system packages (build tools to compile spidev, libatlas3-base for numpy)..."
 SYSTEM_PACKAGES=(
@@ -984,7 +1017,7 @@ SETTINGS
 
 # SPI only takes effect on a reboot, so do it for the user. Skip if SPI is
 # already up (e.g. a re-run) so we don't bounce a working frame.
-if [ -e /dev/spidev0.0 ]; then
+if [ -e "$SPIDEV" ]; then
   echo "SPI already active, no reboot needed."
   # Draw the panel now. An upgrade changes how the frame renders but not what
   # the birds are doing, so the change signature is identical and the timer

@@ -753,3 +753,19 @@ def test_settings_that_are_doing_something_are_not_flagged():
     live = dict(display.DEFAULTS, species_source="", shoot=True, fade_hours=12, hours=24)
     for key in ("base_url", "hours", "bird_names", "rotate", "shoot_title", "fresh_minutes"):
         assert tui.shadow_reason(key, live) is None, key
+
+
+# --- BigTreeTech CB1 ---------------------------------------------------------
+def test_cb1_jumper_choices_are_the_free_header_pins():
+    """The editor offers exactly the pins display.py can map, and none of them
+    is a line the panel already drives."""
+    assert tui.CHOICES["cb1_cs1_pin"] == sorted(display.CB1_FREE_PINS)
+    assert display.DEFAULTS["cb1_cs1_pin"] in display.CB1_FREE_PINS
+    assert not set(display.CB1_FREE_PINS.values()) & set(display.CB1_LINES.values())
+
+
+def test_cb1_refuses_an_unwired_jumper_pin_before_touching_hardware():
+    """Pin 36 is the one the CB1 leaves unwired; naming it must say so, not
+    fail somewhere inside gpiod."""
+    with pytest.raises(ValueError, match="not a free CB1 header pin"):
+        display.cb1_inky(36)

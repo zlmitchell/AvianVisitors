@@ -147,6 +147,7 @@ DEFAULTS = {
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
+    "cb1_cs1_pin": 32,      # BTT CB1 only: header pin the 13.3"'s pin 36 is jumpered to
     "quiet_start": 0, "quiet_end": 0,    # 0/0 = no quiet hours
     "heal_hours": 24,
     "state": "~/.birdframe/state.json",
@@ -659,13 +660,79 @@ def _draw_mat_box(img, opening, aspect=0.75):
 
 
 # --- hardware ---------------------------------------------------------------
-def push_panel(img, rotate, saturation, panel=""):
+# A BigTreeTech CB1 on its Pi4B adapter puts the Inky's Pi pins on Allwinner
+# lines (gpiochip0 offset = the CB1 wiki's GPIO number) and the header SPI on
+# bus 1. Header pins 3/5 (I2C, the panel's ID EEPROM) and 36 (the 13.3"'s
+# second chip select) are not wired at all, so the driver is never auto-detected
+# and pin 36 is jumpered to a free header pin, cb1_cs1_pin.
+CB1_LINES = {"reset": 76, "busy": 78, "dc": 74, "cs0": 79}  # header 13, 11, 15, 37
+CB1_FREE_PINS = {7: 71, 12: 77, 16: 75, 18: 73, 26: 200, 28: 199,
+                 31: 198, 32: 201, 35: 70, 40: 72}
+
+
+def is_cb1():
+    try:
+        with open("/proc/device-tree/compatible", "rb") as f:
+            return b"bigtreetech,cb1" in f.read()
+    except OSError:
+        return False
+
+
+class _NoEeprom:
+    """Header pins 3/5 are not wired on a CB1; don't probe a bus for the ID chip."""
+    def write_i2c_block_data(self, *a):
+        raise OSError("no I2C on the CB1 header")
+
+
+class _SpiBus1:
+    """A SpiDev that opens spidev1.1 whatever bus Inky asks for: its setup()
+    always opens bus 0, and the CB1's header SPI is bus 1."""
+    def __init__(self):
+        import spidev
+        object.__setattr__(self, "_dev", spidev.SpiDev())
+
+    def open(self, bus, device):
+        self._dev.open(1, 1)
+
+    def __getattr__(self, name):
+        return getattr(self._dev, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._dev, name, value)
+
+
+def cb1_inky(cs1_pin):
+    """The 13.3" driver wired to CB1 lines instead of the Pi's."""
+    if cs1_pin not in CB1_FREE_PINS:
+        raise ValueError(f"cb1_cs1_pin {cs1_pin} is not a free CB1 header pin; "
+                         f"use one of {sorted(CB1_FREE_PINS)}")
+    import gpiod
+    from gpiod.line import Bias, Direction, Value
+    from inky.inky_el133uf1 import Inky
+    cs1 = CB1_FREE_PINS[cs1_pin]
+    high = gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.ACTIVE)
+    lines = gpiod.request_lines("/dev/gpiochip0", consumer="inky", config={
+        (CB1_LINES["cs0"], cs1, CB1_LINES["reset"]): high,
+        CB1_LINES["dc"]: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
+        CB1_LINES["busy"]: gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.PULL_UP),
+    })
+    dev = Inky(resolution=(1600, 1200), dc_pin=CB1_LINES["dc"],
+               reset_pin=CB1_LINES["reset"], busy_pin=CB1_LINES["busy"],
+               spi_bus=_SpiBus1(), i2c_bus=_NoEeprom(), gpio=lines)
+    # setup() only maps the chip selects when it requests the lines itself.
+    dev.cs0_pin, dev.cs1_pin = CB1_LINES["cs0"], cs1
+    return dev
+
+
+def push_panel(img, rotate, saturation, panel="", cb1_cs1_pin=32):
     """Rotate to the panel's landscape buffer and push. Lazy import so this
     module still loads on a machine without the Inky library."""
     if rotate not in (90, 270):
         print(f"rotate must be 90 or 270, not {rotate}; using 90", file=sys.stderr)
         rotate = 90
-    if panel == "el133uf1":
+    if is_cb1():
+        dev = cb1_inky(cb1_cs1_pin)
+    elif panel == "el133uf1":
         from inky.inky_el133uf1 import Inky
         dev = Inky(resolution=(1600, 1200))
     else:
@@ -901,7 +968,8 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
         m.close(outcome="preview", species=len(species or []))
         return True
     try:
-        push_panel(img, cfg["rotate"], cfg["saturation"], cfg.get("panel", ""))
+        push_panel(img, cfg["rotate"], cfg["saturation"], cfg.get("panel", ""),
+                   cfg.get("cb1_cs1_pin", 32))
     except Exception as e:
         print(f"panel push failed: {e}", file=sys.stderr)
         m.close(outcome="push-failed", error=str(e))

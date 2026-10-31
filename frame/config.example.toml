@@ -136,6 +136,11 @@ collage_frac = 0.92
 # shoot_collage_vh = 74
 # hours = 48
 # panel = "el133uf1"   # force the 13.3" driver if auto-detect ever fails
+# On a BigTreeTech CB1 (Pi4B adapter) the 13.3" driver is always used, on SPI
+# bus 1 and the CB1's own GPIO lines. The CB1 leaves header pin 36 - the
+# panel's second chip select - unwired, so jumper the panel's pin 36 to a free
+# header pin and name it here: 7, 12, 16, 18, 26, 28, 31, 32, 35 or 40.
+# cb1_cs1_pin = 32
 
 # --- Refresh cadence --------------------------------------------------------
 # The panel refreshes only when the species set, a count bracket, or the set of
