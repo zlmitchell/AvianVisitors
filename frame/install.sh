@@ -438,11 +438,21 @@ preflight_managed_file "$REFRESH_UNIT" 644
 preflight_managed_link "$NAMES_COMMAND" "$FRAME/birdframe-names"
 preflight_managed_link "$SETTINGS_COMMAND" "$FRAME/birdframe"
 preflight_managed_link "$CONTROL_LINK" "$CONTROL_SOURCE"
-preflight_managed_link \
-  "$BUNDLE_COMMAND" \
-  ../lib/avian-birdframe/avian-bundle \
-  /usr/local/lib/avian-birdframe/avian-bundle \
-  "$FRAME/avian-bundle"
+# On the station's own Pi the station installer owns avian-bundle: a root-owned
+# file handing off to its manager, which is the switcher that should win there
+# (the station's next update would replace a frame link anyway). Leave it be.
+STATION_BUNDLE_COMMAND=0
+if [ -f "$BUNDLE_COMMAND" ] && [ ! -L "$BUNDLE_COMMAND" ] \
+    && [ "$(/usr/bin/stat -c '%u' -- "$BUNDLE_COMMAND")" = 0 ] \
+    && /usr/bin/grep -qx 'exec /usr/local/sbin/avian-bundle-control "$@"' "$BUNDLE_COMMAND"; then
+  STATION_BUNDLE_COMMAND=1
+else
+  preflight_managed_link \
+    "$BUNDLE_COMMAND" \
+    ../lib/avian-birdframe/avian-bundle \
+    /usr/local/lib/avian-birdframe/avian-bundle \
+    "$FRAME/avian-bundle"
+fi
 
 PRIVATE_EBIRD_DIR=$HOME/.birdframe
 PRIVATE_EBIRD_FILE=$PRIVATE_EBIRD_DIR/ebird-api-key
@@ -578,8 +588,10 @@ fi
 /usr/bin/sudo /usr/bin/ln -sfnT "$FRAME/birdframe-names" "$NAMES_COMMAND"
 /usr/bin/sudo /usr/bin/ln -sfnT "$FRAME/birdframe" "$SETTINGS_COMMAND"
 /usr/bin/sudo /usr/bin/ln -sfnT "$CONTROL_SOURCE" "$CONTROL_LINK"
-/usr/bin/sudo /usr/bin/ln -sfnT \
-  ../lib/avian-birdframe/avian-bundle "$BUNDLE_COMMAND"
+if [ "$STATION_BUNDLE_COMMAND" = 0 ]; then
+  /usr/bin/sudo /usr/bin/ln -sfnT \
+    ../lib/avian-birdframe/avian-bundle "$BUNDLE_COMMAND"
+fi
 
 # Render fixed unit definitions entirely inside a root-owned shell, before any
 # user-writable Python package code runs. The units remain inert until the final
