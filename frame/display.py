@@ -147,7 +147,7 @@ DEFAULTS = {
     "rotate": 90,           # 90 or 270 if the frame hangs the other way up
     "saturation": 0.6,
     "panel": "",            # "el133uf1" forces the 13.3" driver if auto() fails
-    "cb1_cs1_pin": 32,      # BTT CB1 only: header pin the 13.3"'s pin 36 is jumpered to
+    "cb1_cs1_pin": 35,      # BTT CB1 only: header pin the 13.3"'s pin 36 is jumpered to
     "quiet_start": 0, "quiet_end": 0,    # 0/0 = no quiet hours
     "heal_hours": 24,
     "state": "~/.birdframe/state.json",
@@ -664,7 +664,8 @@ def _draw_mat_box(img, opening, aspect=0.75):
 # lines (gpiochip0 offset = the CB1 wiki's GPIO number) and the header SPI on
 # bus 1. Header pins 3/5 (I2C, the panel's ID EEPROM) and 36 (the 13.3"'s
 # second chip select) are not wired at all, so the driver is never auto-detected
-# and pin 36 is jumpered to a free header pin, cb1_cs1_pin.
+# and pin 36 is jumpered to a free header pin, cb1_cs1_pin. 35 is the default:
+# it is 36's neighbour, and PG9 (pin 32) never reached a Pi4B adapter's header.
 CB1_LINES = {"reset": 76, "busy": 78, "dc": 74, "cs0": 79}  # header 13, 11, 15, 37
 CB1_FREE_PINS = {7: 71, 12: 77, 16: 75, 18: 73, 26: 200, 28: 199,
                  31: 198, 32: 201, 35: 70, 40: 72}
@@ -724,7 +725,7 @@ def cb1_inky(cs1_pin):
     return dev
 
 
-def push_panel(img, rotate, saturation, panel="", cb1_cs1_pin=32):
+def push_panel(img, rotate, saturation, panel="", cb1_cs1_pin=35):
     """Rotate to the panel's landscape buffer and push. Lazy import so this
     module still loads on a machine without the Inky library."""
     if rotate not in (90, 270):
@@ -969,7 +970,7 @@ def run(cfg, preview=None, force=False, use_signature=True, mat_box=False):
         return True
     try:
         push_panel(img, cfg["rotate"], cfg["saturation"], cfg.get("panel", ""),
-                   cfg.get("cb1_cs1_pin", 32))
+                   cfg.get("cb1_cs1_pin", 35))
     except Exception as e:
         print(f"panel push failed: {e}", file=sys.stderr)
         m.close(outcome="push-failed", error=str(e))
