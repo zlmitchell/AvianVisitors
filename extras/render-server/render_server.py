@@ -35,8 +35,11 @@ from PIL import Image, ImageChops
 
 sys.path.insert(0, os.environ.get("FRAME_DIR", "/app/frame"))
 import display                                    # noqa: E402
+import plates                                     # noqa: E402
 
 CONFIG = os.environ.get("FRAME_CONFIG", "/config/config.toml")
+# Finished pictures for other panels, beside the frame's config (plates.py).
+PLATES = os.environ.get("PLATES_CONFIG", os.path.join(os.path.dirname(CONFIG), "plates.toml"))
 STATION = os.environ.get("STATION_URL", "")
 OUT_DIR = os.environ.get("OUT_DIR", "/out")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -50,7 +53,7 @@ OUT = os.path.join(OUT_DIR, "frame.png")
 # poll loop and a ?force= request can both decide to render, and two chromiums
 # racing to write the same file is not something to find out about later.
 _render_lock = threading.Lock()
-_state = {"last": None}
+_state = {"last": None, "plates": {}}
 # Still a .png: playwright picks the screenshot format from the file extension,
 # so a plain ".tmp" is rejected as an unsupported mime type. Dotted so a
 # directory listing does not offer a half-written frame to anyone browsing it.
@@ -148,6 +151,46 @@ def render_once(cfg, why):
     return True
 
 
+def plate_path(name):
+    return os.path.join(OUT_DIR, name + ".png")
+
+
+def configured_plates(cfg):
+    """plates.toml's plates, or none (said once per change) when it is wrong:
+    a typo there must not stop frame.png."""
+    try:
+        found = plates.load(PLATES, cfg)
+        _state.pop("plates_error", None)
+        return found
+    except (ValueError, OSError) as e:
+        if _state.get("plates_error") != str(e):
+            print(f"{PLATES}: {e}; no plates until it is fixed", file=sys.stderr, flush=True)
+            _state["plates_error"] = str(e)
+        return []
+
+
+def render_plates(cfg, species, anchor, only=None, why=None):
+    """Draw each plate whose birds or settings changed (or that has no picture
+    yet), like frame.png. `only` names one plate to draw regardless."""
+    for plate in configured_plates(cfg):
+        if only and plate["name"] != only:
+            continue
+        sig = plates.signature(plate, species, anchor, cfg)
+        last = _state["plates"].get(plate["name"])
+        if not only and sig == last and os.path.exists(plate_path(plate["name"])):
+            continue
+        reason = why or ("changed" if last else "first run")
+        with _render_lock:
+            try:
+                if plates.render(plate, cfg, plate_path(plate["name"]), reason):
+                    _state["plates"][plate["name"]] = sig
+            except Exception:
+                # One plate failing (a bad size, a slow station) must not stop
+                # the others or frame.png; it is retried next time round.
+                traceback.print_exc()
+        reap_orphans()
+
+
 def loop():
     while True:
         try:
@@ -168,6 +211,7 @@ def loop():
                 with _render_lock:
                     if render_once(cfg, "changed" if _state["last"] else "first run"):
                         _state["last"] = sig
+            render_plates(cfg, species, anchor)
         except Exception as e:
             # A .local name is mDNS, and a container has no mDNS resolver - the
             # station is reachable from the Pi and from a desktop and simply is
@@ -209,6 +253,16 @@ def render_now(why):
     return False
 
 
+def render_plate_now(name, why):
+    """Draw one plate now, whatever its birds; nothing if there is no such plate."""
+    try:
+        cfg = load()
+        species, anchor = display.fetch_species(cfg, display._auth(cfg))
+        render_plates(cfg, species, anchor, only=name, why=why)
+    except Exception:
+        traceback.print_exc()
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=OUT_DIR, **k)
@@ -227,11 +281,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         #
         # It blocks for the length of a render, which is the point, and the
         # frame's own `timeout` (180s by default) is the bound on it.
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        #
+        # On a plate's path it draws that plate instead. A panel should not ask
+        # for that on every wake - a render is 15-30s of it awake - but it is
+        # the way to see a plates.toml change now rather than when birds next do.
+        parts = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parts.query)
+        if parts.path == "/preview.png":
+            return self.send_preview(query)
         if query.get("force") and query["force"][0] not in ("0", "false", ""):
-            render_now("forced by " + (self.client_address[0] if self.client_address
-                                       else "?"))
+            who = "forced by " + (self.client_address[0] if self.client_address else "?")
+            name = parts.path.strip("/")
+            name = name[:-len(".png")] if name.endswith(".png") else ""
+            if name and name != "frame" and plates.NAME.match(name):
+                render_plate_now(name, who)
+            else:
+                render_now(who)
         return super().do_GET()
+
+    def send_preview(self, query):
+        """/preview.png?width=800&height=480&names=0&dither=spectra6: any plate,
+        drawn now and not kept, to try a size or a look before it goes into
+        plates.toml. Takes the same settings; width and height are required."""
+        try:
+            cfg = load()
+            plate = plates.from_query(query, cfg)
+        except ValueError as e:
+            return self.send_error(400, str(e))
+        out = os.path.join(OUT_DIR, ".preview.png")
+        ok = False
+        with _render_lock:
+            try:
+                ok = plates.render(plate, cfg, out, "preview")
+            except Exception:
+                traceback.print_exc()
+        reap_orphans()
+        if not ok:
+            return self.send_error(502, "the preview did not render; the server log says why")
+        with open(out, "rb") as f:
+            body = f.read()
+        os.unlink(out)
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, fmt, *a):
         print("http: " + fmt % a, flush=True)
@@ -304,6 +399,12 @@ def main():
             print(f"    {key:<20} {cfg.get(key)!r}", flush=True)
         print(f"    {'-> label_scale':<20} {display.label_scale(cfg):.4f}"
               "   (the one the Pi has to agree with)", flush=True)
+        found = configured_plates(cfg)
+        print(f"plates from {PLATES}: " + (", ".join(
+            f"/{p['name']}.png {p['width']}x{p['height']}"
+            f"{'' if p['names'] else ' no-names'}{'' if p['title'] else ' no-title'}"
+            f"{'' if p['fade'] else ' no-fade'}{'' if p['fresh'] else ' no-outline'}"
+            f" dither={p['dither']}" for p in found) or "none"), flush=True)
     except Exception as e:
         print(f"could not read {CONFIG}: {e}", file=sys.stderr, flush=True)
         return 2

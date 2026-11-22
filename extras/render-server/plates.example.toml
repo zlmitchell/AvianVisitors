@@ -1,0 +1,15 @@
+# Plates: finished pictures for panels that can't crop or dither one themselves.
+# Copy to plates.toml beside config.toml in the /config mount. Each [table] is one
+# plate, served at /<name>.png and redrawn when its birds change. See README.md, "Plates".
+
+[e1002]               # -> /e1002.png: a Seeed reTerminal E1002 (7.3" Spectra 6, ESPHome)
+width = 800           # panel pixels, 16-4000 (required)
+height = 480          # (required)
+names = false         # the bird names (default: the frame's bird_names)
+title = false         # the frame's title and subtitle (default: true)
+fade = false          # drain birds unheard for fade_hours (default: true)
+fresh = true          # outline birds heard in the last fresh_minutes (default: true)
+dither = "spectra6"   # "none" (default): the shot, scaled, in full colour
+                      # "spectra6": every pixel one of the six pure Spectra 6 inks
+saturation = 0.6      # spectra6 only: Inky's measured/pure ink blend (default: the frame's)
+margin = 8            # paper kept round the birds, in panel pixels (default: 8)

@@ -67,6 +67,7 @@ COPY avian/frontend/fonts/ /app/avian/frontend/fonts/
 # beside frame/ - without it the first render dies on import.
 COPY avian/scripts/png_validation.py /app/avian/scripts/png_validation.py
 COPY extras/render-server/render_server.py /app/extras/render-server/render_server.py
+COPY extras/render-server/plates.py /app/extras/render-server/plates.py
 
 # A bind mount over /app shadows all of this, which is how development works:
 # same paths, live edits, no rebuild.

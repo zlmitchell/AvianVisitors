@@ -147,6 +147,58 @@ the ink check - leaves the previous picture in place and serves that. A frame
 showing the last good plate is a better answer to a failed refresh than an error
 the Pi would treat as a broken fetch and skip anyway.
 
+## Plates: finished pictures for other panels
+
+`frame.png` is a screenshot that the frame's Pi still has to crop, mat and
+dither. A small e-ink board such as an ESP32 can only fetch a PNG and put it on
+the glass, so the server can also draw finished pictures, called plates.
+
+Put a `plates.toml` next to `config.toml` in the `/config` folder. Each
+`[table]` in it is one plate, served at `/<name>.png`:
+
+```toml
+[e1002]               # -> /e1002.png, a reTerminal E1002 (7.3" Spectra 6)
+width = 800
+height = 480
+names = false         # default: the frame's bird_names
+title = false         # default: true
+fade = false          # default: true
+fresh = true          # the "still singing" outline; default: true
+dither = "spectra6"   # "none" (default) or "spectra6"
+```
+
+Every plate uses the same birds and the same frame settings as `frame.png`, and
+these steps:
+
+1. It is shot at the plate's own size, with a flock packed wide for a landscape
+   panel.
+2. It is cropped to the birds and scaled to fill the panel.
+3. With `dither = "spectra6"`, it is dithered the way the Inky library dithers
+   for the 13.3" frame, and written as the six *pure* inks. ESPHome's Spectra 6
+   driver maps each pixel to the nearest ink and does no dithering of its own, so
+   it puts this picture on the glass exactly. `saturation` (default: the frame's)
+   and `margin` (default 8 px) are the other two settings.
+
+`plates.example.toml` lists all of them. A plate is redrawn when its own birds
+change, like `frame.png`. A plate without fade ignores fading, so a bird draining
+away does not redraw it.
+
+A panel should fetch the plain `/<name>.png`. The file has a `Last-Modified`
+header, so a panel that sends `If-Modified-Since` gets a 304 when nothing has
+changed. A render takes 15-30 seconds, and a battery panel should not spend
+that time awake on every wake.
+
+`/<name>.png?force=1` draws that plate now. Use it after changing
+`plates.toml`, rather than waiting for the birds to change.
+
+`/preview.png` draws any plate from its query string and keeps nothing. Use it
+to try a size or a look first:
+
+    http://<nas>:8799/preview.png?width=800&height=480&names=0&title=0&fade=0&dither=spectra6
+
+A mistake in `plates.toml` is logged once, and no plates are drawn until it is
+fixed. `frame.png` is unaffected.
+
 ## If it stops answering after days
 
 The symptom, from the Pi's side, is `could not get image: Remote end closed
